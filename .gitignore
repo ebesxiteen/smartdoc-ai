@@ -1,0 +1,9 @@
+todo.txt
+__pycache__/
+index.faiss
+venv/
+RAG.md
+PRD.md
+Status.md
+data/
+*.pdf
