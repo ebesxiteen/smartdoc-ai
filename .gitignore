@@ -1,13 +1,21 @@
-todo.txt
+# Python
 __pycache__/
-index.faiss
+*.py[cod]
 venv/
+
+# Local Data (Don't sync your actual DB or heavy vectors)
+smartdoc.db
+data/vectorstores/
+data/temp/
+todo.txt
 *.md
 !README.md
-data/
-*.pdf
 cspell.json
 .github/
 preference-ui/
 backup/
 change-log.txt
+
+# IDEs
+.vscode/
+.idea/
