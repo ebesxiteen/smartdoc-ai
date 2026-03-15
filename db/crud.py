@@ -255,6 +255,30 @@ def get_notes_for_notebook(notebook_id: str) -> List[Dict[str, Any]]:
         return [dict(row) for row in rows]
 
 
+def update_note(
+    note_id: str, title: Optional[str] = None, content: Optional[str] = None
+) -> None:
+    updates: list[str] = []
+    params: list[str] = []
+
+    if title is not None:
+        updates.append("title = ?")
+        params.append(title)
+
+    if content is not None:
+        updates.append("content = ?")
+        params.append(content)
+
+    if not updates:
+        return
+
+    params.append(note_id)
+    sql = f"UPDATE notes SET {', '.join(updates)}, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+
+    with get_connection() as conn:
+        conn.execute(sql, params)
+
+
 def delete_note(note_id: str) -> None:
     with get_connection() as conn:
         conn.execute("DELETE FROM notes WHERE id = ?", (note_id,))

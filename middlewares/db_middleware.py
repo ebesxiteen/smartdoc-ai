@@ -181,8 +181,6 @@ def add_note(notebook_id: str, title: str, content: str) -> str:
     cleaned_title = validate_and_clean_text(
         title, MAX_NOTE_TITLE_LEN, required=True, field_name="Note Title"
     )
-    if not clean_spaces(content):
-        raise ValueError("Note content cannot be empty.")
 
     # Note content is allowed to be long and maintain whitespace/newlines!
     return crud.add_note(notebook_id, cleaned_title, content)
@@ -190,6 +188,18 @@ def add_note(notebook_id: str, title: str, content: str) -> str:
 
 def get_notes_for_notebook(notebook_id: str) -> List[Dict[str, Any]]:
     return crud.get_notes_for_notebook(notebook_id)
+
+
+def update_note(
+    note_id: str, title: Optional[str] = None, content: Optional[str] = None
+) -> None:
+    cleaned_title = None
+    if title is not None:
+        cleaned_title = validate_and_clean_text(
+            title, MAX_NOTE_TITLE_LEN, required=True, field_name="Note Title"
+        )
+
+    return crud.update_note(note_id, cleaned_title, content)
 
 
 def delete_note(note_id: str) -> None:

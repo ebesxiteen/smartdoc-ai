@@ -5,6 +5,7 @@ A privacy-first RAG application for querying documents with source citations.
 """
 
 import html
+from datetime import datetime, timezone
 
 import streamlit as st
 import os
@@ -32,7 +33,6 @@ from core.utils import (
     merge_vectorstores,
     save_source_to_database,
     process_user_query,
-    save_answer_as_note,
     reload_vectorstore_and_chain,
     load_persisted_vectorstore_filtered,
     get_notebook_vectorstore_dir,
@@ -77,7 +77,7 @@ st.markdown(
         padding-bottom: 1rem;
         padding-left: 1rem;
         padding-right: 1rem;
-        max-width: 1400px;
+        max-width: 2000px;
         margin: 0 auto;
     }
 
@@ -179,10 +179,53 @@ st.markdown(
     .css-1544g2n {
         padding-top: 1rem;
     }
+
+    /* Main workspace section backgrounds — scoped via hidden marker divs injected
+       at the top of each section function. :has() only matches the top-level
+       stColumn that directly contains the marker, not nested inner columns. */
+    [data-testid="stColumn"]:has(.source-hub-bg) {
+        background-color: #f0f4f9;
+        border-radius: 10px;
+        padding: 0.75rem !important;
+    }
+    [data-testid="stColumn"]:has(.chat-section-bg) {
+        background-color: #f9f9fb;
+        border-radius: 10px;
+        padding: 0.75rem !important;
+    }
+    [data-testid="stColumn"]:has(.notes-panel-bg) {
+        background-color: #f4faf2;
+        border-radius: 10px;
+        padding: 0.75rem !important;
+    }
 </style>
 """,
     unsafe_allow_html=True,
 )
+
+
+# ============================================================================
+# HELPERS
+# ============================================================================
+def format_relative_time(dt_str: str) -> str:
+    """Format a DB datetime string as a human-readable relative time."""
+    try:
+        dt = datetime.strptime(dt_str[:19], "%Y-%m-%d %H:%M:%S")
+        now_utc = datetime.now(timezone.utc)
+
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+
+        secs = int((now_utc - dt).total_seconds())
+        if secs < 60:
+            return f"{secs}s ago"
+        if secs < 3600:
+            return f"{secs // 60}m ago"
+        if secs < 86400:
+            return f"{secs // 3600}h ago"
+        return f"{secs // 86400}d ago"
+    except Exception:
+        return dt_str[:10]
 
 
 # ============================================================================
@@ -447,6 +490,9 @@ def go_back_to_notebooks():
 
 def source_hub_ui(print_debug: bool = False):
     """The 'Source Hub' for document management."""
+    st.markdown(
+        '<div class="source-hub-bg" style="display:none"></div>', unsafe_allow_html=True
+    )
     # Header with back arrow and title (vertically centered)
     col1, col2 = st.columns([0.5, 3], vertical_alignment="center")
     with col1:
@@ -806,6 +852,10 @@ def render_user_message(content: str):
 
 def chat_interface(notebook_name: str, print_debug: bool = False):
     """Main chat area - NotebookLM style."""
+    st.markdown(
+        '<div class="chat-section-bg" style="display:none"></div>',
+        unsafe_allow_html=True,
+    )
     # Header with dropdown menu on the right
     col1, col2 = st.columns([20, 1], vertical_alignment="center")
 
@@ -975,28 +1025,6 @@ def chat_interface(notebook_name: str, print_debug: bool = False):
                                         unsafe_allow_html=True,
                                     )
 
-                        # Save as note
-                        col1, col2 = st.columns([1, 4])
-                        with col1:
-                            if st.button(
-                                "💾 Save Note",
-                                key=f"save_{len(st.session_state.chat_history)}",
-                                use_container_width=True,
-                            ):
-                                save_answer_as_note(
-                                    st.session_state.current_notebook_id,
-                                    user_query,
-                                    answer,
-                                    print_debug,
-                                )
-                                # Refresh notes from DB
-                                st.session_state.saved_notes = (
-                                    db.get_notes_for_notebook(
-                                        st.session_state.current_notebook_id
-                                    )
-                                )
-                                st.success("✅ Saved to study notes")
-
                     except Exception as e:
                         error_msg = str(e)
                         logger.error(f"Error: {error_msg}")
@@ -1021,35 +1049,102 @@ def chat_interface(notebook_name: str, print_debug: bool = False):
         # Rerun to refresh chat display
         st.rerun()
 
-    # Study notes section at the bottom
-    if st.session_state.saved_notes:
-        st.markdown("### 📝 Study Notes")
 
-        # Show saved notes count
-        with st.expander(f"View {len(st.session_state.saved_notes)} saved note(s)"):
-            for _, note in enumerate(st.session_state.saved_notes):
-                col1, col2 = st.columns([20, 1])
+# ============================================================================
+# NOTES PANEL
+# ============================================================================
+@st.dialog("New Note")
+def create_note_modal():
+    title = st.text_input("Title", placeholder="Note title...")
+    content = st.text_area("Content", placeholder="Write your note here...", height=200)
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Cancel", use_container_width=True):
+            st.rerun()
+    with col2:
+        if st.button("Save", type="primary", use_container_width=True):
+            try:
+                db.add_note(st.session_state.current_notebook_id, title, content)
+                st.session_state.saved_notes = db.get_notes_for_notebook(
+                    st.session_state.current_notebook_id
+                )
+                st.rerun()
+            except ValueError as e:
+                st.error(str(e))
 
-                with col1:
-                    st.markdown(
-                        f"""
-                        <div class='saved-note'>
-                        <strong>Q: {note.get("title", "N/A")}</strong><br>
-                        <small>{note.get("content", "N/A")}</small>
-                        </div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
 
-                with col2:
-                    if st.button(
-                        "🗑️", key=f"delete_note_{note['id']}", help="Delete note"
-                    ):
-                        db.delete_note(note["id"])
-                        st.session_state.saved_notes = db.get_notes_for_notebook(
-                            st.session_state.current_notebook_id
-                        )
-                        st.rerun()
+@st.dialog("Edit Note")
+def edit_note_modal(note_id: str, current_title: str, current_content: str):
+    title = st.text_input("Title", value=current_title)
+    content = st.text_area("Content", value=current_content or "", height=200)
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Cancel", key="edit_note_cancel", use_container_width=True):
+            st.rerun()
+    with col2:
+        if st.button(
+            "Save", key="edit_note_save", type="primary", use_container_width=True
+        ):
+            try:
+                db.update_note(note_id, title=title, content=content)
+                st.session_state.saved_notes = db.get_notes_for_notebook(
+                    st.session_state.current_notebook_id
+                )
+                st.rerun()
+            except ValueError as e:
+                st.error(str(e))
+
+
+def notes_panel_ui():
+    """Dedicated Notes panel — lists all notes, supports add/edit/delete."""
+    st.markdown(
+        '<div class="notes-panel-bg" style="display:none"></div>',
+        unsafe_allow_html=True,
+    )
+    col_title, col_count = st.columns([4, 1], vertical_alignment="center")
+    with col_title:
+        st.markdown("### Notes")
+    with col_count:
+        note_count = len(st.session_state.saved_notes)
+        if note_count:
+            st.caption(f"{note_count} note{'s' if note_count != 1 else ''}")
+
+    # Fixed-height scroll area — always rendered so "Add Note" stays at the bottom
+    with st.container(height=580, border=False):
+        if st.session_state.saved_notes:
+            for note in st.session_state.saved_notes:
+                with st.expander(f"📝 {note['title']}", expanded=False):
+                    st.caption(format_relative_time(note.get("created_at", "")))
+                    st.markdown(note.get("content") or "*No content*")
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        if st.button(
+                            "Edit",
+                            key=f"edit_note_{note['id']}",
+                            use_container_width=True,
+                        ):
+                            edit_note_modal(
+                                note["id"],
+                                note["title"],
+                                note.get("content") or "",
+                            )
+                    with col2:
+                        if st.button(
+                            "Delete",
+                            key=f"delete_note_{note['id']}",
+                            type="secondary",
+                            use_container_width=True,
+                        ):
+                            db.delete_note(note["id"])
+                            st.session_state.saved_notes = db.get_notes_for_notebook(
+                                st.session_state.current_notebook_id
+                            )
+                            st.rerun()
+        else:
+            st.info("No notes yet.")
+
+    if st.button("+ Add Note", type="primary", use_container_width=True):
+        create_note_modal()
 
 
 def delete_notebook_callback(nb_id: str):
@@ -1249,14 +1344,17 @@ def main():
         notebook = db.get_notebook(st.session_state.current_notebook_id)
         notebook_name = notebook["name"] if notebook else "Unknown Notebook"
 
-        # Split layout into 2 sections (Source Hub vs Chat)
-        col1, col2 = st.columns([1.2, 2.5])
+        # Split layout into 3 sections (Source Hub | Chat | Notes)
+        col1, col2, col3 = st.columns([1.2, 2.8, 1.2])
 
         with col1:
             source_hub_ui(PRINT_DEBUG)
 
         with col2:
             chat_interface(notebook_name, PRINT_DEBUG)
+
+        with col3:
+            notes_panel_ui()
 
 
 if __name__ == "__main__":
