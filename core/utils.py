@@ -8,6 +8,7 @@ import uuid
 from typing import Any, Dict, List, Optional, Set, Tuple
 import logging
 
+import streamlit as st
 from langchain_core.documents import Document
 from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -264,10 +265,21 @@ def process_user_query(
                 "⚠️  LLM did not find relevant context - sources will be hidden"
             )
 
-    # Retrieve source documents for display (separate from RAG chain retrieval)
+    # Retrieve source documents for display using SAME quality filter as the RAG chain
+    # This ensures display citations match exactly what the LLM used to generate the answer
     if print_debug:
-        logger.info("📎 Retrieving top 5 sources for display sidebar...")
-    source_docs = vectorstore.similarity_search(query, k=5)  # pyright: ignore[reportUnknownMemberType]
+        logger.info(
+            "📎 Retrieving quality-filtered sources for display (matching RAG chain)..."
+        )
+
+    source_docs = retrieve_quality_chunks(
+        vectorstore,
+        query,
+        k=RAG_RETRIEVAL_K,
+        min_results=RAG_RETRIEVAL_MIN_RESULTS,
+        score_threshold=RAG_RETRIEVAL_SCORE_THRESHOLD,
+        print_debug=print_debug,
+    )
 
     # Format sources for display
     sources: List[Dict[str, Any]] = []
@@ -359,6 +371,7 @@ def get_source_vectorstore_dir(notebook_id: str, source_id: str) -> Path:
     return src_dir
 
 
+@st.cache_resource(show_spinner=False)
 def try_load_embeddings() -> Optional[HuggingFaceEmbeddings]:
     """Try to load embeddings with GPU, fallback to CPU on OOM."""
     try:
@@ -612,8 +625,6 @@ def reload_vectorstore_and_chain(
     print_debug: bool = False,
 ) -> None:
     """Reload vectorstore and RAG chain based on currently selected sources."""
-    import streamlit as st
-
     st.session_state.vectorstore = load_persisted_vectorstore_filtered(
         notebook_id, selected_sources
     )

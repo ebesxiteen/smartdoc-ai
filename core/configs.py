@@ -25,7 +25,7 @@ EMBEDDING_MODEL_NAME = "sentence-transformers/paraphrase-multilingual-mpnet-base
 # RAG RETRIEVAL CONFIGURATIONS - Optimize these for your use case
 # ============================================================================
 # Maximum number of chunks to retrieve (higher = more context but may cause CUDA OOM)
-RAG_RETRIEVAL_K = 5
+RAG_RETRIEVAL_K = 8
 
 # Minimum results to guarantee even if quality threshold filters out too much
 RAG_RETRIEVAL_MIN_RESULTS = 1
@@ -34,47 +34,51 @@ RAG_RETRIEVAL_MIN_RESULTS = 1
 # Typical range: 5.0-15.0. Lower = stricter filtering (fewer chunks but higher quality)
 RAG_RETRIEVAL_SCORE_THRESHOLD = 15.0
 
-# Max total context length in characters to send to LLM (prevents CUDA OOM)
-RAG_MAX_CONTEXT_LENGTH = 5000
-
 # Max length per chunk in characters (prevents extremely long single chunks)
 RAG_MAX_CHUNK_LENGTH = 1000
 
 # 20% of chunk length overlap between chunks to preserve context
 RAG_CHUNK_OVERLAP = round(.2 * RAG_MAX_CHUNK_LENGTH)
 
+# Max total context length in characters to send to LLM (prevents CUDA OOM)
+RAG_MAX_CONTEXT_LENGTH = RAG_RETRIEVAL_K * RAG_MAX_CHUNK_LENGTH
+
 # ============================================================================
 # LLM CONFIGURATIONS
 # ============================================================================
 
 LLM_PROMPT_TEMPLATE = PromptTemplate(
-    template="""You are a helpful research assistant. Your role is to answer questions based ONLY on the provided document content.
+    template="""You are a helpful research assistant. Answer the user's question using the provided document context.
 
-CRITICAL CONSTRAINTS:
-1. You MUST answer using ONLY the information from the provided context.
-2. Do NOT use your pre-trained knowledge. Do NOT hallucinate or invent information.
-3. If the answer is not found in the context, explicitly state: "The provided sources do not contain information about this."
-4. When citing information, naturally reference the source page number in your response.
-5. Be concise but comprehensive in your answers.
-6. Answer in the same language as the user's question (detect Vietnamese, English, etc.).
+ANSWER GUIDELINES:
+1. Answer using information from the provided context. Prioritize it over general knowledge.
+2. Look carefully through ALL context segments — the answer may be implicit, partial, or spread across multiple sections.
+3. If the context contains relevant information (even indirect or partial), use it to form your best answer.
+4. Do NOT invent specific facts, numbers, names, or data that are not present in the context.
+5. Cite source page numbers naturally when referencing specific information.
+6. Be concise but thorough. Answer in the same language as the question (Vietnamese, English, etc.).
+7. Only say you cannot find the answer if the context has NO information related to the topic at all.
 
-IMPORTANT - At the end of your response, ALWAYS include ONE of these tags:
-- [FOUND_ANSWER: true] — if you found useful information in the context to answer the question
-- [FOUND_ANSWER: false] — if you had to rely on general knowledge or couldn't find relevant info in the context
-
-Do NOT put anything after the [FOUND_ANSWER: true/false] tag.
+IMPORTANT — End your response with exactly ONE of these tags (no text after it):
+- [FOUND_ANSWER: true]  — the context contained useful information to answer the question
+- [FOUND_ANSWER: false] — the context had absolutely no information related to this topic
 
 CONTEXT FROM DOCUMENTS:
 {context}
 
 USER QUESTION: {question}
 
-YOUR ANSWER (grounded only in the provided context):""",
+YOUR ANSWER:""",
     input_variables=["context", "question"],
 )
 LLM_MODEL_NAME = "qwen2.5:7b"
 LLM_BASE_URL = "http://localhost:11434"
-LLM_TEMPERATURE = 0.7  # Slightly creative but grounded
-LLM_NUM_CTX = 2048  # Context window size — lower = less VRAM (default 32768 causes OOM)
 
-PRINT_DEBUG = True  # Set to True to enable detailed debug prints during RAG chain creation and query processing
+# Low temperature for factual, grounded answers, higher may be more creative but less accurate
+LLM_TEMPERATURE = 0.7
+
+# Context window size
+LLM_NUM_CTX = 4096
+
+# Set to True to enable detailed debug prints during RAG chain creation and query processing
+PRINT_DEBUG = True

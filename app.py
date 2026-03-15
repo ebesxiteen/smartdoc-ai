@@ -150,6 +150,28 @@ st.markdown(
         background: transparent !important;
     }
 
+    /* Pending New Files: Process & Cancel as link-style buttons.
+       Targets the 2nd/3rd columns of the [3,2,2] per-file rows — the only
+       3-column horizontal blocks in the sidebar. */
+    section[data-testid="stSidebar"]
+    [data-testid="stHorizontalBlock"]:has(> [data-testid="stColumn"]:nth-child(3))
+    [data-testid="stColumn"]:nth-child(n+2) button {
+        background: transparent !important;
+        border: none !important;
+        box-shadow: none !important;
+        color: #555 !important;
+        text-decoration: underline !important;
+        white-space: nowrap !important;
+        font-size: 0.85rem !important;
+        cursor: pointer !important;
+    }
+    section[data-testid="stSidebar"]
+    [data-testid="stHorizontalBlock"]:has(> [data-testid="stColumn"]:nth-child(3))
+    [data-testid="stColumn"]:nth-child(n+2) button:hover {
+        color: #000 !important;
+        background: transparent !important;
+    }
+
     /* Global layout padding reduction */
     .stApp > header {
         display: none;
@@ -227,6 +249,7 @@ def load_workspace(notebook_id: str, print_debug: bool = False):
     st.session_state.saved_notes = load_saved_notes()
     st.session_state.pending_query = None
     st.session_state.file_uploader_key = 0
+    st.session_state.pending_new_uploads = {}
 
 
 def check_ollama_connection():
@@ -450,12 +473,16 @@ def source_hub_ui(print_debug: bool = False):
     if "pending_replacements" not in st.session_state:
         st.session_state.pending_replacements = {}
 
+    if "pending_new_uploads" not in st.session_state:
+        st.session_state.pending_new_uploads = {}
+
     # Typed alias — mutations propagate back to session_state via dict reference
     pending_repls: Dict[str, bytes] = st.session_state.pending_replacements  # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+    pending_new: Dict[str, bytes] = st.session_state.pending_new_uploads  # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
 
     if uploaded_files:
-        processed_any = False
         new_pending_replacements = False
+        new_pending_new = False
 
         for uploaded_file in uploaded_files:
             filename = uploaded_file.name
@@ -466,15 +493,71 @@ def source_hub_ui(print_debug: bool = False):
                     pending_repls[filename] = uploaded_file.getvalue()
                     new_pending_replacements = True
             else:
-                # Process right away
-                if process_pdf(uploaded_file, filename, True):
-                    processed_any = True
+                # Queue for review before processing (allows cancellation before processing starts)
+                if filename not in pending_new:
+                    pending_new[filename] = uploaded_file.getvalue()
+                    new_pending_new = True
 
         # Clear the uploader after reading the batch
         st.session_state.file_uploader_key += 1
 
-        if processed_any or new_pending_replacements:
+        if new_pending_replacements or new_pending_new:
             st.rerun()
+
+    # Show pending new uploads (review queue — user can cancel before processing)
+    if pending_new:
+        st.markdown("##### Pending New Files")
+        st.caption("Review files before processing. Click Cancel to skip a file.")
+
+        pending_new_files: List[str] = list(pending_new.keys())
+
+        col_process_all, col_cancel_all = st.columns(2)
+        with col_process_all:
+            if st.button(
+                "Process All",
+                key="process_all_new",
+                use_container_width=True,
+                type="primary",
+            ):
+                files_to_process = list(pending_new.items())
+                for fname, fbytes in files_to_process:
+                    del pending_new[fname]
+                    process_pdf(
+                        fbytes, fname, PRINT_DEBUG
+                    )  # process_pdf handles its own spinner
+                st.rerun()
+        with col_cancel_all:
+            if st.button("Cancel All", key="cancel_all_new", use_container_width=True):
+                pending_new.clear()
+                st.rerun()
+
+        for filename in pending_new_files:
+            col_name, col_proc, col_cancel = st.columns(
+                [3, 2, 2], vertical_alignment="center"
+            )
+            with col_name:
+                st.markdown(
+                    f'<p style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin:0;font-size:0.9em;">📄 {filename}</p>',
+                    unsafe_allow_html=True,
+                )
+            with col_proc:
+                if st.button(
+                    "Process",
+                    key=f"process_new_{filename}",
+                    use_container_width=True,
+                ):
+                    file_bytes_new: bytes = pending_new[filename]
+                    del pending_new[filename]
+                    process_pdf(
+                        file_bytes_new, filename, PRINT_DEBUG
+                    )  # process_pdf handles its own spinner
+                    st.rerun()
+            with col_cancel:
+                if st.button(
+                    "Cancel", key=f"cancel_new_{filename}", use_container_width=True
+                ):
+                    del pending_new[filename]
+                    st.rerun()
 
     # Show pending replacements if any are saved in session state
     if pending_repls:
@@ -1073,8 +1156,8 @@ def render_dashboard():
             with col:
                 with st.container(border=True):
                     st.markdown(f"### {nb['name']}")
-                    if nb["description"]:
-                        st.caption(nb["description"])
+                    # Always render caption to keep all cards the same height
+                    st.caption(nb["description"] or "No description")
                     source_count = len(db.get_sources_for_notebook(nb["id"]))
                     st.markdown(
                         f"<small>{nb['created_at'][:10]}  ·  {source_count} source{'s' if source_count != 1 else ''}</small>",
