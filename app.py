@@ -5,7 +5,6 @@ A privacy-first RAG application for querying documents with source citations.
 """
 
 import html
-from datetime import datetime, timezone
 
 import streamlit as st
 import os
@@ -26,6 +25,7 @@ from core.configs import (
     LLM_BASE_URL,
 )
 from core.utils import (
+    format_relative_time,
     hash_pdf_file,
     check_file_already_exists_in_notebook,
     chunk_and_process_pdf,
@@ -202,30 +202,6 @@ st.markdown(
 """,
     unsafe_allow_html=True,
 )
-
-
-# ============================================================================
-# HELPERS
-# ============================================================================
-def format_relative_time(dt_str: str) -> str:
-    """Format a DB datetime string as a human-readable relative time."""
-    try:
-        dt = datetime.strptime(dt_str[:19], "%Y-%m-%d %H:%M:%S")
-        now_utc = datetime.now(timezone.utc)
-
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-
-        secs = int((now_utc - dt).total_seconds())
-        if secs < 60:
-            return f"{secs}s ago"
-        if secs < 3600:
-            return f"{secs // 60}m ago"
-        if secs < 86400:
-            return f"{secs // 3600}h ago"
-        return f"{secs // 86400}d ago"
-    except Exception:
-        return dt_str[:10]
 
 
 # ============================================================================
