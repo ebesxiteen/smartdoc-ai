@@ -8,8 +8,7 @@ smartdoc.db
 data/vectorstores/
 data/temp/
 todo.txt
-*.md
-!README.md
+/documents/
 cspell.json
 .github/
 preference-ui/
