@@ -38,7 +38,7 @@ from core.utils import (
     get_notebook_vectorstore_dir,
     get_source_vectorstore_dir,
     try_load_embeddings,
-    create_rag_chain,
+    create_history_aware_rag_chain,  # ← For history-aware retrieval
 )
 
 # ============================================================================
@@ -258,8 +258,12 @@ def load_workspace(notebook_id: str, print_debug: bool = False):
     )
 
     if st.session_state.vectorstore is not None:
-        st.session_state.rag_chain = create_rag_chain(
-            st.session_state.vectorstore, print_debug
+        # Use history-aware RAG chain for better context understanding
+        st.session_state.chat_history = load_chat_history()
+        st.session_state.rag_chain = create_history_aware_rag_chain(
+            vectorstore=st.session_state.vectorstore,
+            chat_history=st.session_state.chat_history,
+            print_debug=print_debug,
         )
     else:
         st.session_state.rag_chain = None
@@ -383,7 +387,14 @@ def process_pdf(uploaded_file: Any, filename: str, print_debug: bool = False) ->
             st.session_state.vectorstore = merge_vectorstores(
                 st.session_state.vectorstore, new_vectorstore, print_debug
             )
-            st.session_state.rag_chain = create_rag_chain(st.session_state.vectorstore)
+            # Use history-aware RAG chain (with or without history)
+            st.session_state.rag_chain = create_history_aware_rag_chain(
+                vectorstore=st.session_state.vectorstore,
+                chat_history=st.session_state.get(
+                    "chat_history"
+                ),  # May be None on first upload
+                print_debug=print_debug,
+            )
 
             # Generate summary
             logger.info(f"Generating summary for {filename}")
@@ -934,6 +945,24 @@ def chat_interface(notebook_name: str, print_debug: bool = False):
                                 unsafe_allow_html=True,
                             )
 
+        # Auto-scroll marker: scroll to this element when new messages arrive
+        st.markdown('<div id="chat-scroll-anchor"></div>', unsafe_allow_html=True)
+
+        # Inject JavaScript to auto-scroll to bottom when new messages are added
+        st.markdown(
+            """
+            <script>
+            // Auto-scroll to bottom of chat container
+            const chatAnchors = document.querySelectorAll('div#chat-scroll-anchor');
+            if (chatAnchors.length > 0) {
+                const lastAnchor = chatAnchors[chatAnchors.length - 1];
+                lastAnchor.parentElement.parentElement.parentElement.scrollTop = lastAnchor.parentElement.parentElement.parentElement.scrollHeight;
+            }
+            </script>
+            """,
+            unsafe_allow_html=True,
+        )
+
     if user_query:
         # Add user message to history
         db.add_chat_message(
@@ -958,13 +987,14 @@ def chat_interface(notebook_name: str, print_debug: bool = False):
             with chat_container:
                 with st.spinner("🤔 Thinking..."):
                     try:
-                        # Get answer and sources via RAG chain
+                        # Get answer and sources via RAG chain with chat history context
                         logger.info(f"Processing query: {user_query[:50]}...")
                         answer, sources, found_answer = process_user_query(
                             user_query,
                             st.session_state.rag_chain,
                             st.session_state.vectorstore,
-                            print_debug,
+                            chat_history=st.session_state.chat_history,
+                            print_debug=print_debug,
                         )
 
                         # Display answer

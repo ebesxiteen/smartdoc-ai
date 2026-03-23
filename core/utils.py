@@ -16,28 +16,36 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_ollama import OllamaLLM
 
 from core.configs import (
+    APP_NAME,
     ASSISTANT_ROLE_NAME,
+    DEFAULT_EN_GREETING_PATTERNS,
     EMBEDDING_MODEL_NAME,
+    GREETING_PATTERNS_BY_LANGUAGE,
     LLM_BASE_URL,
     LLM_MODEL_NAME,
     LLM_NUM_CTX,
     LLM_PROMPT_TEMPLATE,
     LLM_TEMPERATURE,
+    MAX_MSG_HISTORY,
     RAG_CHUNK_OVERLAP,
     RAG_MAX_CHUNK_LENGTH,
     RAG_MAX_CONTEXT_LENGTH,
     RAG_RETRIEVAL_K,
     RAG_RETRIEVAL_MIN_RESULTS,
     RAG_RETRIEVAL_SCORE_THRESHOLD,
+    REPHRASE_PROMPT,
     USER_ROLE_NAME,
 )
 from langchain_community.document_loaders import PyMuPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.runnables import RunnablePassthrough, RunnableLambda
 from langchain_core.output_parsers import StrOutputParser
+from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_classic.chains import create_history_aware_retriever
 from pathlib import Path
-from middlewares import db_middleware as db
-
+import re
+from langdetect import detect  # pyright: ignore[reportMissingTypeStubs, reportUnknownVariableType]
 
 logger = logging.getLogger(__name__)
 
@@ -189,6 +197,7 @@ def save_source_to_database(
         source_id: Pre-generated UUID (pass when you need it upfront for path calculation).
                    If None, a new UUID is generated internally.
     """
+    from middlewares import db_middleware as db
 
     if print_debug:
         logger.info(f"Saving source to database: {filename}")
@@ -218,10 +227,16 @@ def process_user_query(
     query: str,
     rag_chain: Any,
     vectorstore: FAISS,
+    chat_history: Optional[List[Dict[str, Any]]] = None,
     print_debug: bool = False,
 ) -> tuple[str, List[Dict[str, Any]], bool]:
     """
-    Process a user query through the RAG chain and retrieve relevant sources.
+    Process a user query through the RAG chain with optional chat history context.
+
+    Handles three scenarios:
+    1. Greeting/general questions: Answer without searching documents
+    2. Follow-up questions: Use chat history to rephrase for accurate retrieval
+    3. New questions: Direct document search and answer
 
     Returns:
         (answer, sources_list, found_answer)
@@ -236,18 +251,49 @@ def process_user_query(
             else f"🔡 Processing query: {query}"
         )
 
-    # Generate answer through RAG chain (quality retriever runs internally here)
-    if print_debug:
-        logger.info("⏳ Invoking RAG chain with quality-filtered chunks...")
+    # Step 1: Check if this is a greeting/general question
+    is_greeting_query = is_greeting(query)
+    if print_debug and is_greeting_query:
+        logger.info("👋 Detected greeting/general question - using general knowledge")
 
-    answer = rag_chain.invoke(query)
+    # Step 2: Prepare inputs for the RAG chain
+    # Build chain input dict with proper structure for history-aware chain
+    chain_input_dict: Dict[str, Any] = {"input": query, "question": query}
+
+    if chat_history and not is_greeting_query:
+        formatted_history = format_chat_history_for_rephrase(
+            chat_history, max_messages=MAX_MSG_HISTORY
+        )
+        chain_input_dict["chat_history"] = formatted_history  # type: ignore[typeddict-unknown-key]
+        if print_debug:
+            logger.info(
+                f"📜 Including {len(formatted_history)} history messages for context"
+            )
+
+    # Step 3: Generate answer through RAG chain
+    if print_debug:
+        if is_greeting_query:
+            logger.info("⏳ Invoking RAG chain with general knowledge mode...")
+        else:
+            logger.info("⏳ Invoking RAG chain with quality-filtered chunks...")
+
+    try:
+        # Invoke chain with proper input structure
+        # The history-aware chain expects dict with "input" and optional "chat_history"
+        answer = rag_chain.invoke(chain_input_dict)
+    except Exception as e:
+        logger.error(f"Error invoking RAG chain: {e}")
+        if print_debug:
+            logger.error(f"    Full error: {str(e)}")
+        answer = f"[FOUND_ANSWER: false]\nI encountered an error processing your query: {str(e)}"
 
     if print_debug:
         logger.info(f"✅ LLM response generated ({len(answer)} chars)")
 
-    # Parse [FOUND_ANSWER: true/false] tag from answer
-    found_answer = True  # Default to True if tag not found
+    # Step 4: Parse [FOUND_ANSWER: true/false/general] tag from answer
+    found_answer = True  # Default to True
     answer_clean = answer
+    is_general_answer = is_greeting_query
 
     # Check for [FOUND_ANSWER: true] tag
     if "[FOUND_ANSWER: true]" in answer:
@@ -257,51 +303,59 @@ def process_user_query(
     elif "[FOUND_ANSWER: false]" in answer:
         found_answer = False
         answer_clean = answer.replace("[FOUND_ANSWER: false]", "").strip()
+        is_general_answer = True
+    # Check for [FOUND_ANSWER: general] tag (new general knowledge marker)
+    elif "[FOUND_ANSWER: general]" in answer:
+        found_answer = False
+        answer_clean = answer.replace("[FOUND_ANSWER: general]", "").strip()
+        is_general_answer = True
 
     if print_debug:
         if found_answer:
             logger.info("✅ LLM found relevant context - sources will be displayed")
+        elif is_general_answer:
+            logger.info("💡 LLM answered from general knowledge - no sources needed")
         else:
             logger.warning(
                 "⚠️  LLM did not find relevant context - sources will be hidden"
             )
 
-    # Retrieve source documents for display using SAME quality filter as the RAG chain
-    # This ensures display citations match exactly what the LLM used to generate the answer
-    if print_debug:
-        logger.info(
-            "📎 Retrieving quality-filtered sources for display (matching RAG chain)..."
+    # Step 5: Retrieve source documents for display (only if not a general question)
+    sources: List[Dict[str, Any]] = []
+
+    if not is_general_answer and print_debug:
+        logger.info("📎 Retrieving quality-filtered sources for display...")
+
+    if not is_general_answer:
+        source_docs = retrieve_quality_chunks(
+            vectorstore,
+            query,
+            k=RAG_RETRIEVAL_K,
+            min_results=RAG_RETRIEVAL_MIN_RESULTS,
+            score_threshold=RAG_RETRIEVAL_SCORE_THRESHOLD,
+            print_debug=print_debug,
         )
 
-    source_docs = retrieve_quality_chunks(
-        vectorstore,
-        query,
-        k=RAG_RETRIEVAL_K,
-        min_results=RAG_RETRIEVAL_MIN_RESULTS,
-        score_threshold=RAG_RETRIEVAL_SCORE_THRESHOLD,
-        print_debug=print_debug,
-    )
+        # Format sources for display
+        for i, doc in enumerate(source_docs, 1):
+            doc_metadata: Dict[str, Any] = doc.metadata  # type: ignore[assignment]
+            source_entry: Dict[str, Any] = {
+                "document": str(doc_metadata.get("document", "Unknown")),
+                "page": str(doc_metadata.get("page", "N/A")),
+                "content": (
+                    doc.page_content[:200] + "..."
+                    if len(doc.page_content) > 200
+                    else doc.page_content
+                ),
+            }
+            sources.append(source_entry)
+            if print_debug:
+                logger.debug(
+                    f"   Source {i}: {source_entry['document']} (Page {source_entry['page']})"
+                )
 
-    # Format sources for display
-    sources: List[Dict[str, Any]] = []
-    for i, doc in enumerate(source_docs, 1):
-        source_entry = {  # pyright: ignore[reportUnknownVariableType]
-            "document": doc.metadata.get("document", "Unknown"),  # pyright: ignore[reportUnknownMemberType]
-            "page": doc.metadata.get("page", "N/A"),  # pyright: ignore[reportUnknownMemberType]
-            "content": (
-                doc.page_content[:200] + "..."
-                if len(doc.page_content) > 200
-                else doc.page_content
-            ),
-        }
-        sources.append(source_entry)  # pyright: ignore[reportUnknownArgumentType]
         if print_debug:
-            logger.debug(
-                f"   Source {i}: {source_entry['document']} (Page {source_entry['page']})"
-            )
-
-    if print_debug:
-        logger.info(f"✅ Retrieved {len(sources)} display sources")
+            logger.info(f"✅ Retrieved {len(sources)} display sources")
 
     return answer_clean, sources, found_answer
 
@@ -314,6 +368,8 @@ def save_query_and_answer_to_history(
     print_debug: bool = False,
 ) -> None:
     """Save user query and assistant answer to chat history database."""
+    from middlewares import db_middleware as db
+
     if print_debug:
         logger.info(f"Saving query/answer to history for notebook {notebook_id}")
 
@@ -340,6 +396,8 @@ def save_answer_as_note(
     print_debug: bool = False,
 ) -> None:
     """Save an answer as a study note in the notebook."""
+    from middlewares import db_middleware as db
+
     if print_debug:
         logger.info(f"Saving answer as note in notebook {notebook_id}")
 
@@ -650,6 +708,8 @@ def load_persisted_vectorstore_filtered(
     Returns:
         Merged FAISS vectorstore or None if no valid sources selected
     """
+    from middlewares import db_middleware as db
+
     if not selected_source_ids:
         return None
 
@@ -704,3 +764,324 @@ def format_relative_time(dt_str: str) -> str:
         return f"{secs // 86400}d ago"
     except Exception:
         return dt_str[:10]
+
+
+# ============================================================================
+# ADVANCED RAG: CHAT HISTORY & GREETING DETECTION
+# ============================================================================
+
+
+def is_greeting(user_query: str) -> bool:
+    """
+    Detect if user query is a greeting or general question across multiple languages.
+
+    Supports: English, Vietnamese, and Mandarin Chinese with automatic language detection.
+    Falls back to English patterns if language detection fails.
+
+    Args:
+        user_query: The user's input text
+
+    Returns:
+        True if query is a greeting/general question, False if it needs document search
+    """
+    query_lower = clean_spaces(user_query.lower())
+
+    try:
+        # Detect language
+        detected_lang: str = str(detect(query_lower))  # type: ignore[misc]
+
+        # Map detected language codes to our supported languages
+        # langdetect uses ISO 639-1 codes: 'en', 'vi', 'zh-cn', 'zh-tw', etc.
+        if detected_lang.startswith("zh"):  # type: ignore[union-attr]
+            lang_code = "zh"  # Both Simplified and Traditional Chinese
+        elif detected_lang in ("en", "vi"):
+            lang_code = detected_lang
+        else:
+            # Unsupported language, fall back to English patterns
+            lang_code = "en"
+
+        # Get language-specific patterns
+        patterns = GREETING_PATTERNS_BY_LANGUAGE.get(
+            lang_code, DEFAULT_EN_GREETING_PATTERNS
+        )
+
+        for pattern in patterns:
+            if re.match(pattern, query_lower):
+                return True
+
+        return False
+
+    except Exception as e:
+        # If language detection fails, fall back to English patterns
+        logger.debug(
+            f"Language detection failed: {e}. Using English patterns as fallback."
+        )
+        for pattern in DEFAULT_EN_GREETING_PATTERNS:
+            if re.match(pattern, query_lower):
+                return True
+        return False
+
+
+def format_chat_history_for_rephrase(
+    chat_history: List[Dict[str, Any]], max_messages: int = MAX_MSG_HISTORY
+) -> List[BaseMessage]:
+    """
+    Convert database chat history to LangChain message format for history-aware retriever.
+
+    Takes the latest N messages from chat history and converts them to LangChain's
+    HumanMessage/AIMessage format for use in history-aware retrieval chains.
+
+    Args:
+        chat_history: List of message dicts from database (role, content, etc.)
+        max_messages: Maximum number of messages to include (use latest N messages)
+
+    Returns:
+        List of LangChain BaseMessage objects (HumanMessage or AIMessage)
+    """
+    messages: List[BaseMessage] = []
+
+    # Use only the latest max_messages to avoid context overflow
+    for msg in chat_history[-max_messages:]:
+        if msg["role"] == USER_ROLE_NAME:
+            messages.append(HumanMessage(content=msg["content"]))
+        elif msg["role"] == ASSISTANT_ROLE_NAME:
+            messages.append(AIMessage(content=msg["content"]))
+
+    return messages
+
+
+def condense_question_with_history(
+    current_question: str,
+    chat_history: List[BaseMessage],
+    llm: OllamaLLM,
+    print_debug: bool = False,
+) -> str:
+    """
+    Rephrase a question using chat history to make it standalone.
+
+    Converts conversational questions like "What about the second point?" into
+    "What about the second point regarding photosynthesis?" by referencing prior context.
+
+    Args:
+        current_question: The current user question
+        chat_history: Formatted chat history (LangChain messages)
+        llm: OllamaLLM instance
+        print_debug: Enable debug logging
+
+    Returns:
+        Rephrased standalone version of the question
+    """
+    if not chat_history:
+        # No history, return original question
+        return current_question
+
+    if print_debug:
+        logger.info(
+            f"🔄 Condensing question with {len(chat_history)} history messages..."
+        )
+
+    # Prompt that instructs the LLM to rephrase the question
+    rephrase_prompt: ChatPromptTemplate = ChatPromptTemplate.from_messages(  # type: ignore[misc]
+        [
+            (
+                "system",
+                "Given a chat history and the latest user question which might reference context from previous messages, "
+                "formulate a standalone question which can be understood without the chat history. "
+                "Keep it concise and preserve all important details from the original question. "
+                "Do NOT answer the question, just rephrase it to be standalone.",
+            ),
+            MessagesPlaceholder("chat_history"),
+            ("human", "{input}"),
+        ]
+    )
+
+    # Build the rephrasing chain
+    rephrase_chain: Any = rephrase_prompt | llm  # type: ignore[operator]
+
+    # Invoke with chat history and current question
+    condensed: str = rephrase_chain.invoke(  # type: ignore[attr-defined]
+        {
+            "chat_history": chat_history,
+            "input": current_question,
+        }
+    )
+
+    if print_debug:
+        logger.info(f"✅ Original: {current_question}")
+        logger.info(f"✅ Condensed: {condensed}")
+
+    return condensed
+
+
+def get_enhanced_system_prompt() -> str:
+    """
+    Get enhanced system prompt with current time and general knowledge permission.
+
+    Returns a modified LLM prompt that:
+    1. Includes current timestamp for time-aware questions
+    2. Permits the LLM to answer general questions from its own knowledge
+    3. Maintains strict grounding for document-based questions
+
+    Returns:
+        Enhanced system prompt string
+    """
+    current_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    enhanced_prompt = f"""You are {APP_NAME} - a helpful research assistant.
+Current Time: {current_time}
+
+ANSWER GUIDELINES:
+1. **For Document Questions**: Use the provided context to answer. Prioritize it over general knowledge.
+   - Look carefully through ALL context segments — the answer may be implicit or spread across multiple sections.
+   - If the context contains relevant information (even indirect), use it to form your best answer.
+   - Do NOT invent specific facts, numbers, names, or data that are not present in the context.
+   - Cite source page numbers naturally when referencing specific information.
+
+2. **For General Questions**: If the user asks about greetings, your capabilities, the current time/date, or general knowledge:
+   - Answer politely using your general knowledge (no document context needed).
+   - Be helpful and conversational naturally without searching documents.
+
+3. **Language & Tone**:
+   - Answer in the same language as the question (Vietnamese, English, etc.).
+   - Be concise but thorough.
+
+4. **Unknown Answers**:
+   - Only say you cannot find the answer in documents if the context has NO information related to the topic.
+   - For general questions, you can use your knowledge to provide a helpful response.
+
+IMPORTANT — End your response with exactly ONE of these tags (no text after it):
+- [FOUND_ANSWER: true]  — the context contained useful information to answer the question
+- [FOUND_ANSWER: false] — the context had no relevant information, but you answered from general knowledge
+- [FOUND_ANSWER: general] — the question was a greeting/general question answered without document context
+
+CONTEXT FROM DOCUMENTS:
+{{context}}
+
+USER QUESTION: {{question}}
+
+YOUR ANSWER:"""
+
+    return enhanced_prompt
+
+
+def create_history_aware_rag_chain(
+    vectorstore: FAISS,
+    chat_history: Optional[List[Dict[str, Any]]] = None,
+    print_debug: bool = False,
+) -> Any:
+    """
+    Build a history-aware RAG chain that can handle follow-up questions.
+
+    This chain:
+    1. Takes chat history and current question
+    2. Rephrases the question for standalone retrieval
+    3. Retrieves context from vectorstore
+    4. Generates answer with document context + general knowledge fallback
+
+    Args:
+        vectorstore: FAISS vectorstore object
+        chat_history: Optional list of previous messages from database
+        print_debug: Enable debug logging
+
+    Returns:
+        Runnable chain that accepts {"input": question} and optional {"chat_history": [...]}
+    """
+    if print_debug:
+        logger.info("\n🔗 Building History-Aware RAG Chain...")
+
+    # Step 1: Create quality-based retriever
+    def quality_retriever(query: str) -> List[Document]:
+        return retrieve_quality_chunks(
+            vectorstore,
+            query,
+            k=RAG_RETRIEVAL_K,
+            min_results=RAG_RETRIEVAL_MIN_RESULTS,
+            score_threshold=RAG_RETRIEVAL_SCORE_THRESHOLD,
+            print_debug=print_debug,
+        )
+
+    # Step 2: Initialize LLM
+    llm = OllamaLLM(
+        model=LLM_MODEL_NAME,
+        base_url=LLM_BASE_URL,
+        temperature=LLM_TEMPERATURE,
+        num_ctx=LLM_NUM_CTX,
+    )
+
+    # Step 3: Create history-aware retriever prompt with domain awareness
+    # Optimized to better leverage chat history for question reformulation
+    rephrase_prompt: ChatPromptTemplate = ChatPromptTemplate.from_messages(  # type: ignore[misc]
+        [
+            (
+                "system",
+                REPHRASE_PROMPT,
+            ),
+            MessagesPlaceholder("chat_history"),
+            ("human", "{input}"),
+        ]
+    )
+
+    # Step 4: Create the history-aware retriever using LangChain
+    history_aware_retriever: Any = create_history_aware_retriever(  # type: ignore[call-arg]
+        llm, vectorstore.as_retriever(), rephrase_prompt
+    )
+
+    # Step 5: Create enhanced prompt template with time and general knowledge permission
+    enhanced_system_prompt: str = get_enhanced_system_prompt()
+    qa_prompt: ChatPromptTemplate = ChatPromptTemplate.from_template(
+        enhanced_system_prompt
+    )  # type: ignore[misc]
+
+    # Step 6: Build the complete chain
+    # If chat history is provided, use the history-aware flow
+    if chat_history:
+        formatted_history: List[BaseMessage] = format_chat_history_for_rephrase(
+            chat_history
+        )
+
+        rag_chain: Any = (  # type: ignore[assignment]
+            {
+                "chat_history": RunnableLambda(lambda x: formatted_history),
+                "context": RunnableLambda(
+                    lambda x: format_context_with_sources(
+                        docs=history_aware_retriever.invoke(  # type: ignore[attr-defined]
+                            {
+                                "input": str(x.get("input", ""))  # type: ignore[union-attr]
+                                if isinstance(x, dict)
+                                else "",
+                                "chat_history": formatted_history,
+                            }
+                        ),
+                        print_debug=print_debug,
+                    )
+                ),
+                "question": RunnablePassthrough(),
+            }
+            | qa_prompt
+            | llm
+            | StrOutputParser()
+        )
+    else:
+        rag_chain: Any = (  # type: ignore[assignment]
+            {
+                "context": RunnableLambda(
+                    lambda query: format_context_with_sources(  # type: ignore[misc]
+                        docs=quality_retriever(str(query)),
+                        print_debug=print_debug,
+                    )
+                ),
+                "question": RunnablePassthrough(),
+            }
+            | qa_prompt
+            | llm
+            | StrOutputParser()
+        )
+
+    if print_debug:
+        logger.info("   ✅ History-Aware RAG Chain created!")
+        logger.info("\n   Chain Flow:")
+        logger.info(
+            "   Question + History → Rephrase → Quality Retriever → Context Formatter → Enhanced Prompt → LLM → Answer"
+        )
+
+    return rag_chain
