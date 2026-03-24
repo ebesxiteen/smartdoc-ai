@@ -224,7 +224,7 @@ def load_saved_notes() -> List[Dict[str, Any]]:
 
 
 def load_documents_state() -> Dict[str, Any]:
-    """Load documents metadata from database."""
+    """Load documents metadata from database. Key by source ID (not filename, to avoid duplicates)."""
     notebook_id = st.session_state.get("current_notebook_id")
     if not notebook_id:
         return {}
@@ -232,11 +232,13 @@ def load_documents_state() -> Dict[str, Any]:
     sources = db.get_sources_for_notebook(notebook_id)
     docs_dict: Dict[str, Any] = {}
     for src in sources:
-        docs_dict[src["file_name"]] = {
+        # Use source ID as key to avoid collisions when sources have the same filename
+        docs_dict[src["id"]] = {
+            "id": src["id"],
+            "file_name": src["file_name"],
             "loaded": True,
             "summary": src["summary"],
             "suggested_questions": src["suggested_questions"],
-            "id": src["id"],
         }
     return docs_dict
 
@@ -299,6 +301,15 @@ def initialize_session_state():
 
     if "file_uploader_key" not in st.session_state:
         st.session_state.file_uploader_key = 0
+
+    if "rename_source_modal_open" not in st.session_state:
+        st.session_state.rename_source_modal_open = False
+
+    if "rename_source_id" not in st.session_state:
+        st.session_state.rename_source_id = None
+
+    if "rename_source_name" not in st.session_state:
+        st.session_state.rename_source_name = None
 
 
 def generate_summary(rag_chain: Any) -> str:
@@ -429,12 +440,13 @@ def process_pdf(uploaded_file: Any, filename: str, print_debug: bool = False) ->
                 print_debug=print_debug,
             )
 
-            # Update session state
-            st.session_state.documents[filename] = {
+            # Update session state - use source_id as key to avoid filename collisions
+            st.session_state.documents[source_id] = {
+                "id": source_id,
+                "file_name": filename,
                 "loaded": True,
                 "summary": summary,
                 "suggested_questions": suggested_questions,
-                "id": source_id,
             }
 
             # Save the individual source vectorstore to the path we calculated above
@@ -519,16 +531,25 @@ def source_hub_ui(print_debug: bool = False):
 
         for uploaded_file in uploaded_files:
             filename = uploaded_file.name
+            file_bytes = uploaded_file.getvalue()
+            file_hash = hash_pdf_file(file_bytes)
 
-            if filename in st.session_state.documents:
-                # Store in memory to ask user, if not already asking
-                if filename not in pending_repls:
-                    pending_repls[filename] = uploaded_file.getvalue()
+            # Check for duplicates by hash (not filename) to handle renamed files correctly
+            existing_source = check_file_already_exists_in_notebook(
+                file_hash, st.session_state.current_notebook_id
+            )
+
+            if existing_source:
+                # This file hash already exists (may have been renamed)
+                # Use the source ID as the key to handle duplicate filenames
+                existing_source_id = existing_source.get("id")
+                if existing_source_id not in pending_repls:
+                    pending_repls[existing_source_id] = file_bytes
                     new_pending_replacements = True
             else:
-                # Queue for review before processing (allows cancellation before processing starts)
+                # No duplicate found
                 if filename not in pending_new:
-                    pending_new[filename] = uploaded_file.getvalue()
+                    pending_new[filename] = file_bytes
                     new_pending_new = True
 
         # Clear the uploader after reading the batch
@@ -598,7 +619,11 @@ def source_hub_ui(print_debug: bool = False):
         # Copy keys to a list to safely iterate
         pending_files: List[str] = list(pending_repls.keys())
 
-        for filename in pending_files:
+        for source_id in pending_files:
+            # Fetch the source info to display its filename
+            source_info = st.session_state.documents.get(source_id, {})
+            filename = source_info.get("file_name", "Unknown")
+
             container = st.container()
             with container:
                 st.warning(f"**{filename}** is already loaded.")
@@ -609,28 +634,27 @@ def source_hub_ui(print_debug: bool = False):
 
                 with col_btn1:
                     replace_clicked = st.button(
-                        "Replace", key=f"replace_{filename}", use_container_width=True
+                        "Replace", key=f"replace_{source_id}", use_container_width=True
                     )
                 with col_btn2:
                     cancel_clicked = st.button(
-                        "Cancel", key=f"cancel_{filename}", use_container_width=True
+                        "Cancel", key=f"cancel_{source_id}", use_container_width=True
                     )
 
                 if replace_clicked:
                     status_placeholder.info(
                         f"⏳ Replacing '{filename}'... Please wait."
                     )
-                    file_bytes: bytes = pending_repls[filename]
+                    file_bytes: bytes = pending_repls[source_id]
 
                     # Remove the file from pending immediately so it doesn't get processed again
-                    del pending_repls[filename]
+                    del pending_repls[source_id]
 
                     # Phase 1: Remove old version
-                    doc_info = st.session_state.documents.get(filename, {})
-                    if "id" in doc_info:
-                        db.delete_source(doc_info["id"])
+                    if source_id in st.session_state.documents:
+                        db.delete_source(source_id)
                         source_dir = get_source_vectorstore_dir(
-                            st.session_state.current_notebook_id, doc_info["id"]
+                            st.session_state.current_notebook_id, source_id
                         )
                         if source_dir.exists():
                             import shutil
@@ -638,10 +662,8 @@ def source_hub_ui(print_debug: bool = False):
                             shutil.rmtree(source_dir, ignore_errors=True)
 
                         # Remove from selected sources if it was selected
-                        st.session_state.selected_sources.discard(doc_info["id"])
-
-                    if filename in st.session_state.documents:
-                        del st.session_state.documents[filename]
+                        st.session_state.selected_sources.discard(source_id)
+                        del st.session_state.documents[source_id]
 
                     # Reload updated vectorstore with filtered selection
                     reload_vectorstore_and_chain(
@@ -657,7 +679,7 @@ def source_hub_ui(print_debug: bool = False):
                     st.rerun()
 
                 if cancel_clicked:
-                    del pending_repls[filename]
+                    del pending_repls[source_id]
                     st.rerun()
 
     st.markdown("#### Loaded Documents")
@@ -695,30 +717,30 @@ def source_hub_ui(print_debug: bool = False):
         with col_check:
             st.checkbox(
                 "Select all sources",
-                value=all_selected,
                 key="select_all_sources",
                 on_change=on_select_all_change,
                 label_visibility="collapsed",
             )
 
         # Display sources with checkbox on the RIGHT (matching NotebookLM style)
-        for doc_name, doc_info in st.session_state.documents.items():
-            doc_id = doc_info.get("id")
+        for source_id, doc_info in st.session_state.documents.items():
+            # source_id is the key (UUID), get filename from doc_info
+            file_name = doc_info.get("file_name", "Unknown")
 
             # Initialize checkbox state if needed
-            checkbox_key = f"checkbox_{doc_id}"
+            checkbox_key = f"checkbox_{source_id}"
             if checkbox_key not in st.session_state:
                 st.session_state[checkbox_key] = (
-                    doc_id in st.session_state.selected_sources
+                    source_id in st.session_state.selected_sources
                 )
 
             # Callback to handle checkbox changes
-            def on_checkbox_change(source_id: str, checkbox_key_param: str):
+            def on_checkbox_change(src_id: str, checkbox_key_param: str):
                 """Handle checkbox state change."""
                 if st.session_state[checkbox_key_param]:
-                    st.session_state.selected_sources.add(source_id)
+                    st.session_state.selected_sources.add(src_id)
                 else:
-                    st.session_state.selected_sources.discard(source_id)
+                    st.session_state.selected_sources.discard(src_id)
 
                 # Reload vectorstore
                 reload_vectorstore_and_chain(
@@ -728,7 +750,7 @@ def source_hub_ui(print_debug: bool = False):
                 )
 
                 # Update "Select all sources" checkbox state based on current selection
-                all_ids = {di["id"] for di in st.session_state.documents.values()}
+                all_ids = {sid for sid in st.session_state.documents.keys()}
                 st.session_state["select_all_sources"] = (
                     st.session_state.selected_sources == all_ids
                 )
@@ -741,7 +763,7 @@ def source_hub_ui(print_debug: bool = False):
 
                 with col_expand:
                     # Expandable details section
-                    with st.expander(f"📄 {doc_name}", expanded=False):
+                    with st.expander(f"📄 {file_name}", expanded=False):
                         if doc_info.get("summary"):
                             st.caption(f"**Summary:** {doc_info['summary']}")
 
@@ -751,32 +773,40 @@ def source_hub_ui(print_debug: bool = False):
                         with col_detail2:
                             with st.popover("⋮", use_container_width=False):
                                 if st.button(
+                                    "Rename",
+                                    key=f"rename_{source_id}",
+                                    use_container_width=True,
+                                ):
+                                    st.session_state.rename_source_modal_open = True
+                                    st.session_state.rename_source_id = source_id
+                                    st.session_state.rename_source_name = file_name
+                                    st.rerun()
+                                if st.button(
                                     "Delete",
-                                    key=f"delete_{doc_name}",
+                                    key=f"delete_{source_id}",
                                     type="secondary",
                                     use_container_width=True,
                                 ):
-                                    with st.spinner(f"Removing {doc_name}..."):
-                                        logger.info(f"Removing document: {doc_name}")
-                                        if doc_id:
-                                            db.delete_source(doc_id)
-                                            source_dir = get_source_vectorstore_dir(
-                                                st.session_state.current_notebook_id,
-                                                doc_id,
-                                            )
-                                            if source_dir.exists():
-                                                import shutil
+                                    with st.spinner(f"Removing {file_name}..."):
+                                        logger.info(f"Removing document: {file_name}")
+                                        db.delete_source(source_id)
+                                        source_dir = get_source_vectorstore_dir(
+                                            st.session_state.current_notebook_id,
+                                            source_id,
+                                        )
+                                        if source_dir.exists():
+                                            import shutil
 
-                                                shutil.rmtree(
-                                                    source_dir, ignore_errors=True
-                                                )
-
-                                            # Remove from selected sources if selected
-                                            st.session_state.selected_sources.discard(
-                                                doc_id
+                                            shutil.rmtree(
+                                                source_dir, ignore_errors=True
                                             )
 
-                                        del st.session_state.documents[doc_name]
+                                        # Remove from selected sources if selected
+                                        st.session_state.selected_sources.discard(
+                                            source_id
+                                        )
+
+                                        del st.session_state.documents[source_id]
 
                                         # Reload vectorstore
                                         reload_vectorstore_and_chain(
@@ -785,13 +815,6 @@ def source_hub_ui(print_debug: bool = False):
                                             print_debug,
                                         )
                                         st.rerun()
-                                st.button(
-                                    "Rename",
-                                    key=f"rename_{doc_name}",
-                                    disabled=True,
-                                    use_container_width=True,
-                                    help="Coming soon",
-                                )
 
                 with col_check:
                     # Checkbox on the RIGHT side
@@ -799,7 +822,7 @@ def source_hub_ui(print_debug: bool = False):
                         label="Select",
                         key=checkbox_key,
                         on_change=on_checkbox_change,
-                        args=(doc_id, checkbox_key),
+                        args=(source_id, checkbox_key),
                         label_visibility="collapsed",
                     )
     else:
@@ -1227,6 +1250,55 @@ def rename_notebook_modal(
                 st.error(f"Error renaming notebook: {str(e)}")
 
 
+def rename_source_modal(source_id: str, current_name: str):
+    """Modal dialog to rename a source file."""
+    st.markdown("Rename source:")
+
+    new_name = st.text_input(
+        "Filename",
+        value=current_name,
+        placeholder="e.g., Biology Textbook, Research Paper...",
+    )
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Cancel", use_container_width=True):
+            st.session_state.rename_source_modal_open = False
+            st.rerun()
+
+    with col2:
+        if st.button("Save", type="primary", use_container_width=True):
+            try:
+                if new_name == current_name:
+                    st.warning("No changes made.")
+                    return
+
+                # Pass through middleware for validation
+                db.rename_source(source_id, new_name)
+                st.success("✅ Source renamed successfully!")
+
+                # Update session state documents to reflect change (keyed by source_id)
+                if source_id in st.session_state.documents:
+                    st.session_state.documents[source_id]["file_name"] = new_name
+
+                st.session_state.rename_source_modal_open = False
+                st.rerun()
+            except ValueError as e:
+                st.error(f"❌ {str(e)}")
+            except Exception as e:
+                logger.error(f"Error renaming source {source_id}: {str(e)}")
+                st.error(f"Error renaming source: {str(e)}")
+
+
+@st.dialog("Rename Source", width="small")
+def show_rename_source_dialog():
+    """Display rename source modal dialog."""
+    if st.session_state.rename_source_id:
+        rename_source_modal(
+            st.session_state.rename_source_id, st.session_state.rename_source_name or ""
+        )
+
+
 # ============================================================================
 # NOTEBOOK DASHBOARD
 # ============================================================================
@@ -1349,6 +1421,13 @@ def main():
         # Get notebook details
         notebook = db.get_notebook(st.session_state.current_notebook_id)
         notebook_name = notebook["name"] if notebook else "Unknown Notebook"
+
+        # Display rename source modal if needed
+        if (
+            st.session_state.rename_source_modal_open
+            and st.session_state.rename_source_id
+        ):
+            show_rename_source_dialog()
 
         # Split layout into 3 sections (Source Hub | Chat | Notes)
         col1, col2, col3 = st.columns([1.2, 2.8, 1.2])

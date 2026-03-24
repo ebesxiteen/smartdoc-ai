@@ -177,6 +177,32 @@ def delete_source(source_id: str) -> None:
         conn.execute("DELETE FROM sources WHERE id = ?", (source_id,))
 
 
+def update_source(
+    source_id: str, file_name: Optional[str] = None, summary: Optional[str] = None
+) -> None:
+    """Update source file_name and/or summary."""
+    with get_connection() as conn:
+        # Build dynamic UPDATE statement
+        updates: list[str] = []
+        params: list[str] = []
+
+        if file_name is not None:
+            updates.append("file_name = ?")
+            params.append(file_name)
+
+        if summary is not None:
+            updates.append("summary = ?")
+            params.append(summary)
+
+        if not updates:
+            return  # Nothing to update
+
+        params.append(source_id)
+
+        sql = f"UPDATE sources SET {', '.join(updates)}, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+        conn.execute(sql, params)
+
+
 # ==========================================
 # CHAT MESSAGES
 # ==========================================

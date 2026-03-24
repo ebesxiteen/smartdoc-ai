@@ -145,6 +145,20 @@ def delete_source(source_id: str) -> None:
     return crud.delete_source(source_id)
 
 
+def rename_source(source_id: str, new_file_name: Optional[str] = None) -> None:
+    """Validates and rename a source file_name."""
+    cleaned_name = None
+    if new_file_name is not None:
+        cleaned_name = validate_and_clean_text(
+            new_file_name, MAX_FILENAME_LEN, required=True, field_name="Filename"
+        )
+
+    if cleaned_name is None:
+        raise ValueError("Filename cannot be empty.")
+
+    return crud.update_source(source_id, file_name=cleaned_name)
+
+
 def get_source_by_hash(file_hash: str) -> Optional[Dict[str, Any]]:
     """Check if a file with this hash already exists."""
     return crud.get_source_by_hash(file_hash)
