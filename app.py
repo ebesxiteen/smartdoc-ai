@@ -901,7 +901,7 @@ def chat_interface(notebook_name: str, print_debug: bool = False):
     # Check if any sources are selected
     if not st.session_state.selected_sources:
         st.warning(
-            "⚠️ No sources selected. Select at least one source in the Source Hub to ask questions."
+            "⭐ No sources selected. Select at least one source in the Source Hub to ask questions."
         )
         return
 
@@ -1309,7 +1309,7 @@ def render_dashboard():
         st.markdown(f"<h1 class='main-header'>{APP_NAME}</h1>", unsafe_allow_html=True)
         st.caption("Your personalized NotebookLM-inspired AI assistant")
     with header_col2:
-        if st.button("Create New Notebook", type="primary", use_container_width=True):
+        if st.button("+ Create New Notebook", type="primary", use_container_width=True):
             create_notebook_modal()
 
     st.subheader("Your Notebooks")
