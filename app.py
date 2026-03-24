@@ -542,7 +542,7 @@ def source_hub_ui(print_debug: bool = False):
             if existing_source:
                 # This file hash already exists (may have been renamed)
                 # Use the source ID as the key to handle duplicate filenames
-                existing_source_id = existing_source.get("id")
+                existing_source_id = str(existing_source.get("id"))
                 if existing_source_id not in pending_repls:
                     pending_repls[existing_source_id] = file_bytes
                     new_pending_replacements = True
@@ -686,11 +686,6 @@ def source_hub_ui(print_debug: bool = False):
 
     if st.session_state.documents:
         # "Select all sources" row with checkbox on the right (matching NotebookLM style)
-        all_selected = (
-            len(st.session_state.selected_sources) == len(st.session_state.documents)
-            and len(st.session_state.documents) > 0
-        )
-
         def on_select_all_change():
             """Handle select-all checkbox state change."""
             checked = st.session_state["select_all_sources"]
@@ -750,7 +745,7 @@ def source_hub_ui(print_debug: bool = False):
                 )
 
                 # Update "Select all sources" checkbox state based on current selection
-                all_ids = {sid for sid in st.session_state.documents.keys()}
+                all_ids = set(st.session_state.documents.keys())
                 st.session_state["select_all_sources"] = (
                     st.session_state.selected_sources == all_ids
                 )

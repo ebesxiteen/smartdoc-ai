@@ -215,8 +215,12 @@ def add_chat_message(
 ) -> str:
     msg_id = str(uuid.uuid4())
     sources_str = json.dumps(sources) if sources else None
+
     # Convert bool to int for SQLite (True=1, False=0, None=NULL)
-    found_answer_int = None if found_answer is None else (1 if found_answer else 0)
+    if found_answer is None:
+        found_answer_int = None
+    else:
+        found_answer_int = 1 if found_answer else 0
 
     with get_connection() as conn:
         conn.execute(
