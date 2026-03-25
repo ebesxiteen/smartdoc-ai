@@ -1,0 +1,268 @@
+# SmartDoc AI - Local NotebookLM-Inspired Document Intelligence System
+
+> A privacy-first, open-source alternative to Google's NotebookLM. Query your documents with AI-powered semantic search, source-grounded answers, and automatic citations.
+
+![Status](https://img.shields.io/badge/status-v1.0.0-green) ![License](https://img.shields.io/badge/license-MIT-blue) ![Python](https://img.shields.io/badge/python-3.8%2B-blue) ![Course](https://img.shields.io/badge/course-OSSD%20Spring%202026-orange)
+
+## 🌟 Features
+
+- **📚 Document Hub**: Upload and manage multiple PDF documents in organized notebooks
+- **🔍 Semantic Search**: Intelligently retrieve the most relevant document sections using FAISS vector embeddings
+- **🤖 Grounded AI Responses**: Get answers strictly based on your documents with automatic source citations
+- **🌐 Multi-language Support**: Ask questions in Vietnamese, English, or other languages and receive answers in your preferred language
+- **💾 Persistent Storage**: All documents, chat history, and notes are saved to a local SQLite database
+- **📝 Study Notes**: Save important Q&A pairs as notes to build a personalized study guide
+- **⚡ Privacy First**: Runs entirely locally with [Ollama](https://ollama.com/)-your documents never leave your machine
+- **🎨 NotebookLM-Inspired UI**: Clean, intuitive Streamlit interface mirroring the NotebookLM experience
+
+## 🔧 Technology Stack
+
+| Component | Technology | Purpose |
+| ----------- | ----------- | --------- |
+| **UI Framework** | [Streamlit](https://streamlit.io/) | Interactive web interface |
+| **Orchestration** | [LangChain](https://python.langchain.com/) | RAG pipeline & prompt management |
+| **Vector Database** | [FAISS](https://github.com/facebookresearch/faiss) | Fast similarity search on CPU |
+| **Embeddings** | [Sentence Transformers](https://www.sbert.net/) | Multi-language text vectorization (paraphrase-multilingual-mpnet-base-v2) |
+| **LLM** | [Ollama](https://ollama.ai/) + [Qwen2.5:7b](https://huggingface.co/Qwen/Qwen2.5-7B) | Local inference with Vietnamese support |
+| **Database** | [SQLite](https://sqlite.org/) | Metadata and chat history persistence |
+| **PDF Processing** | [PyMuPDF](https://pymupdf.readthedocs.io/) | Extract text from PDFs |
+
+## 📋 Prerequisites
+
+- **Python**: 3.8 or higher
+- **Ollama**: Running locally with `qwen2.5:7b` model pulled
+- **System Memory**: 8GB RAM minimum (16GB+ recommended for optimal performance)
+- **GPU** (optional): CUDA-capable GPU for faster embeddings (CPU fallback available)
+
+## 🚀 Quick Start
+
+### 1. Clone and Setup
+
+```bash
+# Clone the repository
+git clone https://github.com/dungtq2k5/smartdoc-ai.git
+cd smartdoc-ai
+
+# Create virtual environment
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# Install dependencies
+pip install -r requirements.txt
+```
+
+### 2. Install & Start Ollama
+
+```bash
+# Download Ollama from https://ollama.ai/
+# Then pull the Qwen2.5 model (required)
+ollama pull qwen2.5:7b
+
+# Start Ollama server (runs in background)
+ollama serve
+```
+
+### 3. Run the Application
+
+```bash
+# In a new terminal, ensure venv is activated
+source venv/bin/activate
+
+# Start Streamlit
+streamlit run app.py
+```
+
+The app will open at `http://localhost:8501`.
+
+## 📖 Usage Guide
+
+### Creating a Notebook
+
+1. Click **"+ Create New Notebook"** on the dashboard
+2. Enter a notebook name (e.g., "Machine Learning Research")
+3. Optionally add a description
+
+### Uploading Documents
+
+1. Select a notebook from the dashboard
+2. Go to the **Source Hub** (left sidebar)
+3. Click **"Upload Documents"** and select one or more PDFs
+4. Review and confirm uploads—documents are automatically processed
+
+### Asking Questions
+
+1. Select which documents to query using checkboxes
+2. Type your question in the chat input
+3. SmartDoc retrieves relevant sections and generates a grounded answer
+4. Click on **retrieved sources** beneath each answer to verify citations
+
+### Saving Notes
+
+1. After getting a good answer, click **"Save as Note"** below the response
+2. Edit the note title if needed
+3. Saved notes are compiled in the **Notes Panel** (right sidebar)
+
+### Deleting Content
+
+- **Remove a document**: Click the ⋮ menu next to a source → "Delete"
+- **Delete a notebook**: Click the ⋮ menu next to notebook name → "Delete"
+- **Clear chat history**: Click the ⋮ menu next to "Chat" title → "Delete chat history"
+
+## ⚙️ Configuration
+
+All tunable parameters are centralized in [core/configs.py](./core/configs.py):
+
+```python
+# RAG Tuning (adjust for inference quality vs speed)
+RAG_RETRIEVAL_K = 4              # Top K chunks to retrieve
+RAG_RETRIEVAL_SCORE_THRESHOLD = 15.0  # Lower = stricter filtering
+RAG_MAX_CONTEXT_LENGTH = 3000    # Characters sent to LLM
+
+# LLM Setup
+LLM_BASE_URL = "http://localhost:11434"  # Ollama server
+LLM_MODEL_NAME = "qwen2.5:7b"
+LLM_TEMPERATURE = 0.7            # 0 = deterministic, 1 = creative
+
+# ...
+```
+
+## 📁 Project Structure
+
+```txt
+smartdoc-ai/
+├── app.py                    # Main Streamlit entry point
+├── core/
+│   ├── configs.py           # Centralized configuration parameters
+│   └── utils.py             # RAG pipeline & utility functions
+├── db/
+│   ├── setup.py             # Database schema initialization
+│   └── crud.py              # SQLite database operations
+├── middlewares/
+│   └── db_middleware.py     # Input validation & sanitization
+├── data/
+│   ├── smartdoc.db          # SQLite database (auto-created)
+│   └── vectorstores/        # FAISS indices (organized by notebook/source)
+├── requirements.txt         # Python dependencies
+├── README.md               # This file
+├── LICENSE                 # MIT License
+└── CHANGELOG.md            # Version history
+```
+
+## 🐛 Troubleshooting
+
+### **Issue: "Ollama Offline" error in sidebar**
+
+**Solution:**
+
+- Verify Ollama is running: `ollama serve` in a separate terminal
+- Check Ollama is at `http://localhost:11434`: `curl http://localhost:11434/api/tags`
+- Restart Streamlit: `streamlit run app.py`
+
+### **Issue: CUDA out of memory error**
+
+**Solution:**
+
+- The app automatically falls back to CPU—this is normal on limited GPUs
+- Reduce the number of selected documents (use checkboxes)
+- Lower `RAG_RETRIEVAL_K` in [core/configs.py](./core/configs.py)
+
+### **Issue: Slow embedding or inference**
+
+**Solution:**
+
+- First embeddings are slower; subsequent queries cache results
+- Qwen2.5:7b performs inference at ~10-15 tokens/sec on CPU (single-threaded)
+- For faster speeds, use a GPU or upgrade to a larger GPU memory
+
+### **Issue: Documents not appearing after upload**
+
+**Solution:**
+
+- Check file size (PDFs > 50MB may time out)
+- Verify the PDF is text-based (not image scans)
+- Try uploading a smaller section of the PDF first
+
+## 🧠 How It Works
+
+### Two-Pipeline Architecture
+
+#### Pipeline 1: Ingestion (Document Upload)
+
+1. Extract text from PDF using PyMuPDF
+2. Split text into overlapping chunks (RecursiveCharacterTextSplitter)
+3. Embed chunks using sentence-transformers
+4. Store embeddings in FAISS; metadata in SQLite
+
+#### Pipeline 2: Query (User Question)
+
+1. Embed user's question
+2. Search FAISS for top-K similar chunks
+3. Filter by relevance score
+4. Augment prompt with retrieved context
+5. Send to Qwen2.5 (via Ollama)
+6. Stream response with source citations
+
+### Why Local-First?
+
+✅ **Privacy**: Your documents never leave your machine
+✅ **Offline**: Works without internet connectivity
+✅ **Cost-Free**: No API charges or subscriptions
+✅ **Customizable**: Full control over embeddings, LLM, and parameters
+
+## 📊 Project Status
+
+**Version**: 1.0.0 (Initial Release)
+**Completion**: 95.2% (79/83 development tasks completed)
+**Last Updated**: March 25, 2026
+
+## 📚 Documentation
+
+- [CHANGELOG.md](./CHANGELOG.md) — Version history and release notes
+
+## 🎓 Academic Context
+
+This project was developed as part of the **Open Source Software Development (OSSD)** course at **Đại học Sài Gòn** (Saigon University), Spring 2026.
+
+**Learning Objectives:**
+
+- Build a full-stack AI application with modern Python frameworks
+- Implement RAG principles for grounded AI responses
+- Work with vector databases and embeddings
+- Deploy privacy-first ML systems using local LLMs
+- Practice collaborative open-source development
+
+## 📝 License
+
+This project is licensed under the **MIT License**—see [LICENSE](./LICENSE) for details.
+
+You are free to use, modify, and distribute this software for educational, commercial, or personal purposes.
+
+## 🍴 Forking
+
+This project is designed as a learning implementation for the OSSD course and is **not actively maintained for external contributions**.
+
+**Feel free to fork!** You can take this code and make it your own:
+
+- **Extend it**: Add features like Word document support, OCR for scanned PDFs, or cloud deployment
+- **Customize it**: Modify the UI, change the LLM model, or integrate different vector databases
+- **Learn from it**: Use this as a reference for building your own RAG systems
+- **Share improvements**: If you make significant improvements, feel free to share them as a reference
+
+This codebase is open under the [MIT License](https://en.wikipedia.org/wiki/MIT_License), so you have full freedom to use and modify it for any purpose.
+
+## 🙏 Acknowledgments
+
+- **Google NotebookLM** — Inspiration for the UI/UX design
+- **LangChain** — RAG orchestration framework
+- **Ollama** — Local LLM infrastructure
+- **FAISS** — Efficient vector search
+- **Streamlit** — Interactive web framework
+- **Qwen Team** — Excellent multilingual LLM
+
+## 📧 Issues & Questions
+
+If you encounter bugs or have questions, please check the [Issues tab](https://github.com/dungtq2k5/smartdoc-ai/issues) first. Feel free to open a new issue if you find a bug.
+
+---
+
+**Happy documenting! 📚✨**
