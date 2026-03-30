@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- **Word Document Support**: Upload and process `.docx` files alongside PDFs.
+- **Answer Generation Resume**: Auto-resume answer generation if the process is interrupted (e.g., if the user accidentally refreshes the page or unselects all resources during generation).
+
+### Changed
+
+- **Suggested Questions UI**: Improved display of `source.suggested_questions` by randomly picking up to 3 questions across all available resources rather than just the first resource.
+- **Summary Generation Strategy**: Modified the `source.summary` generation process to use a more efficient "Top-K Slicing" method instead of semantic search, improving summary relevance.
+
+### Fixed
+
+- **Input Text Truncation Handling**: Prevented silent truncation of user input before saving to the database by throwing an explicit error when limits are exceeded. Ensured LLM-generated fields like `source.summary` and `source.suggested_questions` are not restricted by truncation, preserving data integrity.
+
 ## [1.0.0] - 2026-03-25
 
 ### Project Status
@@ -188,3 +204,8 @@ None
 
 - [Project Repository](https://github.com/dungtq2k5/smartdoc-ai)
 - [Issue Tracker](https://github.com/dungtq2k5/smartdoc-ai/issues)
+
+---
+
+[Unreleased]: https://github.com/dungtq2k5/smartdoc-ai/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/dungtq2k5/smartdoc-ai/releases/tag/v1.0.0

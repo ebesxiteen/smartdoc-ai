@@ -6,7 +6,7 @@
 
 ## 🌟 Features
 
-- **📚 Document Hub**: Upload and manage multiple PDF documents in organized notebooks
+- **📚 Document Hub**: Upload and manage multiple PDF and Word documents in organized notebooks
 - **🔍 Semantic Search**: Intelligently retrieve the most relevant document sections using FAISS vector embeddings
 - **🤖 Grounded AI Responses**: Get answers strictly based on your documents with automatic source citations
 - **🌐 Multi-language Support**: Ask questions in Vietnamese, English, or other languages and receive answers in your preferred language
@@ -25,7 +25,7 @@
 | **Embeddings** | [Sentence Transformers](https://www.sbert.net/) | Multi-language text vectorization (paraphrase-multilingual-mpnet-base-v2) |
 | **LLM** | [Ollama](https://ollama.ai/) + [Qwen2.5:7b](https://huggingface.co/Qwen/Qwen2.5-7B) | Local inference with Vietnamese support |
 | **Database** | [SQLite](https://sqlite.org/) | Metadata and chat history persistence |
-| **PDF Processing** | [PyMuPDF](https://pymupdf.readthedocs.io/) | Extract text from PDFs |
+| **Document Processing** | [PyMuPDF](https://pymupdf.readthedocs.io/) & [python-docx](https://python-docx.readthedocs.io/) | Extract text from PDFs and Word documents |
 
 ## 📋 Prerequisites
 
@@ -86,7 +86,7 @@ The app will open at `http://localhost:8501`.
 
 1. Select a notebook from the dashboard
 2. Go to the **Source Hub** (left sidebar)
-3. Click **"Upload Documents"** and select one or more PDFs
+3. Click **"Upload Documents"** and select one or more PDF or DOCX files
 4. Review and confirm uploads—documents are automatically processed
 
 ### Asking Questions
@@ -188,7 +188,7 @@ smartdoc-ai/
 
 #### Pipeline 1: Ingestion (Document Upload)
 
-1. Extract text from PDF using PyMuPDF
+1. Extract text from PDF using PyMuPDF or Word using python-docx
 2. Split text into overlapping chunks (RecursiveCharacterTextSplitter)
 3. Embed chunks using sentence-transformers
 4. Store embeddings in FAISS; metadata in SQLite
@@ -243,7 +243,7 @@ This project is designed as a learning implementation for the OSSD course and is
 
 **Feel free to fork!** You can take this code and make it your own:
 
-- **Extend it**: Add features like Word document support, OCR for scanned PDFs, or cloud deployment
+- **Extend it**: Add features like Excel document support, OCR for scanned PDFs, or cloud deployment
 - **Customize it**: Modify the UI, change the LLM model, or integrate different vector databases
 - **Learn from it**: Use this as a reference for building your own RAG systems
 - **Share improvements**: If you make significant improvements, feel free to share them as a reference
