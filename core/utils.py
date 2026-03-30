@@ -46,6 +46,7 @@ from langchain_classic.chains import create_history_aware_retriever
 from pathlib import Path
 import re
 from langdetect import detect  # pyright: ignore[reportMissingTypeStubs, reportUnknownVariableType]
+import docx
 
 logger = logging.getLogger(__name__)
 
@@ -71,29 +72,49 @@ def clean_spaces(text: str) -> str:
 # ============================================================================
 
 
-def load_and_chunk_pdf(
-    pdf_path: str,
+def load_and_chunk_file(
+    file_path: str,
+    file_type: str,
     chunk_size: int = RAG_MAX_CHUNK_LENGTH,
     chunk_overlap: int = RAG_CHUNK_OVERLAP,
     print_debug: bool = False,
 ):
     """
-    Load a PDF and chunk it into overlapping segments.
+    Load a file (PDF or DOCX) and chunk it into overlapping segments.
 
     Args:
-      pdf_path: Path to the PDF file
+      file_path: Path to the file
+      file_type: Type of the file ('pdf' or 'docx')
 
     Returns:
       List of Document objects with chunked text
     """
-    # Step 1: Load the PDF
-    loader = PyMuPDFLoader(pdf_path)
-    documents = loader.load()
+    # Step 1: Load the Document
+    documents = []
+    if file_type == "pdf":
+        loader = PyMuPDFLoader(file_path)
+        documents = loader.load()
+    elif file_type == "docx":
+        doc = docx.Document(file_path)
+        full_text: List[str] = []
+        for para in doc.paragraphs:
+            if para.text.strip():
+                full_text.append(para.text)
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    if cell.text.strip():
+                        full_text.append(cell.text)
+        text = "\n".join(full_text)
+        if text.strip():
+            documents = [Document(page_content=text, metadata={"source": file_path})]
+    else:
+        raise ValueError(f"Unsupported file type for loading: {file_type}")
 
     if print_debug:
-        print(f"✅ Loaded PDF: {pdf_path}")
-        print(f"   Total pages: {len(documents)}")
-        print(f"   Total characters: {sum(len(doc.page_content) for doc in documents)}")
+        print(f"✅ Loaded {file_type.upper()}: {file_path}")
+        print(f"   Total documents/pages: {len(documents)}")
+        print(f"   Total characters: {sum(len(d.page_content) for d in documents)}")
 
     # Step 2: Split into chunks
     text_splitter = RecursiveCharacterTextSplitter(
@@ -119,9 +140,25 @@ def load_and_chunk_pdf(
     return chunks
 
 
-def hash_pdf_file(file_bytes: bytes) -> str:
-    """Calculate MD5 hash of PDF file content."""
+def hash_file_content(file_bytes: bytes) -> str:
+    """Calculate MD5 hash of file content."""
     return hashlib.md5(file_bytes).hexdigest()
+
+
+def detect_file_type(file_bytes: bytes) -> str:
+    """Detect file type based on magic numbers."""
+    if file_bytes.startswith(b"%PDF"):
+        return "pdf"
+    elif (
+        file_bytes.startswith(b"PK\x03\x04")
+        or file_bytes.startswith(b"PK\x05\x06")
+        or file_bytes.startswith(b"PK\x07\x08")
+    ):
+        return "docx"
+    else:
+        raise ValueError(
+            "Unsupported file format. Only PDF and Word (docx) are supported."
+        )
 
 
 def check_file_already_exists(file_hash: str) -> Optional[Dict[str, Any]]:
@@ -140,13 +177,13 @@ def check_file_already_exists_in_notebook(
     return get_source_by_hash_and_notebook(file_hash, notebook_id)
 
 
-def chunk_and_process_pdf(
-    pdf_path: str, filename: str, print_debug: bool = False
+def chunk_and_process_file(
+    file_path: str, file_type: str, filename: str, print_debug: bool = False
 ) -> Tuple[List[Document], int]:
-    """Load PDF, chunk it, and add metadata."""
+    """Load File, chunk it, and add metadata."""
     if print_debug:
-        logger.info(f"Loading and chunking PDF: {filename}")
-    chunks = load_and_chunk_pdf(pdf_path)
+        logger.info(f"Loading and chunking {file_type.upper()}: {filename}")
+    chunks = load_and_chunk_file(file_path, file_type, print_debug=print_debug)
 
     # Add document name to metadata
     for chunk in chunks:
@@ -184,6 +221,7 @@ def merge_vectorstores(
 def save_source_to_database(
     notebook_id: str,
     filename: str,
+    file_type: str,
     file_hash: str,
     summary: str,
     suggested_questions: List[str],
@@ -208,6 +246,7 @@ def save_source_to_database(
     saved_source_id = db.add_source(
         notebook_id=notebook_id,
         file_name=filename,
+        file_type=file_type,
         file_path=vectorstore_path,
         file_hash=file_hash,
         summary=summary,
@@ -651,17 +690,22 @@ def create_rag_chain(vectorstore: FAISS, print_debug: bool = False) -> Any:
         num_ctx=LLM_NUM_CTX,
     )
 
+    def get_query(q: Any) -> str:
+        if isinstance(q, dict):
+            return str(q.get("input", q.get("question", "")))  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]
+        return str(q)
+
     # Step 4: Build the chain using LCEL
     # This chains: question → quality_retriever → format context → prompt → llm → output
     rag_chain: Any = (  # type: ignore
         {
             "context": RunnableLambda(
                 lambda query: format_context_with_sources(
-                    docs=quality_retriever(query),  # pyright: ignore[reportArgumentType]
+                    docs=quality_retriever(get_query(query)),
                     print_debug=print_debug,
                 )
             ),
-            "question": RunnablePassthrough(),
+            "question": RunnableLambda(get_query),
         }
         | prompt_template
         | llm

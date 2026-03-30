@@ -87,6 +87,7 @@ def update_notebook(
 def add_source(
     notebook_id: str,
     file_name: Optional[str],
+    file_type: str,
     file_path: str,
     file_hash: str,
     summary: Optional[str] = None,
@@ -98,6 +99,7 @@ def add_source(
     Args:
         notebook_id: The notebook ID
         file_name: Original filename
+        file_type: Type of the file (e.g., 'pdf', 'docx')
         file_path: Path to vectorstore directory (e.g., "./data/vectorstores/nb_xyz/src_abc")
         file_hash: MD5 hash of file content
         summary: Document summary
@@ -116,11 +118,12 @@ def add_source(
 
     with get_connection() as conn:
         conn.execute(
-            "INSERT INTO sources (id, notebook_id, file_name, file_path, file_hash, summary, suggested_questions) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO sources (id, notebook_id, file_name, file_type, file_path, file_hash, summary, suggested_questions) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 source_id,
                 notebook_id,
                 file_name,
+                file_type,
                 file_path,
                 file_hash,
                 summary,

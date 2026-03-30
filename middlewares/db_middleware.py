@@ -9,15 +9,16 @@ from core.configs import (
     MAX_FILENAME_LEN,
     MAX_DESCRIPTION_LEN,
     MAX_NOTEBOOK_NAME_LEN,
-    MAX_SOURCE_SUMMARY_LEN,
-    MAX_SUGGESTED_QUESTION_LEN,
 )
 
 logger = logging.getLogger(__name__)
 
 
 def validate_and_clean_text(
-    text: Optional[str], max_len: int, required: bool = False, field_name: str = "Field"
+    text: Optional[str],
+    max_len: Optional[int],
+    required: bool = False,
+    field_name: str = "Field",
 ) -> Optional[str]:
     """Helper to clean spaces and validate length."""
     if text is None:
@@ -29,11 +30,10 @@ def validate_and_clean_text(
     if required and not cleaned:
         raise ValueError(f"{field_name} cannot be empty.")
 
-    if len(cleaned) > max_len:
-        logger.warning(
-            f"{field_name} truncated: '{cleaned[:20]}...' exceeded length {max_len}"
+    if max_len is not None and len(cleaned) > max_len:
+        raise ValueError(
+            f"{field_name} must be {max_len} characters or fewer. (Provided {len(cleaned)} characters)"
         )
-        return cleaned[:max_len]
 
     return cleaned
 
@@ -99,6 +99,7 @@ def rename_notebook(
 def add_source(
     notebook_id: str,
     file_name: str,
+    file_type: str,
     file_path: str,
     file_hash: str,
     summary: Optional[str],
@@ -109,8 +110,12 @@ def add_source(
         file_name, MAX_FILENAME_LEN, required=True, field_name="Filename"
     )
 
+    cleaned_filetype = validate_and_clean_text(
+        file_type, 50, required=True, field_name="File Type"
+    )
+
     cleaned_summary = validate_and_clean_text(
-        summary, MAX_SOURCE_SUMMARY_LEN, required=False, field_name="Summary"
+        summary, None, required=False, field_name="Summary"
     )
 
     if suggested_questions:
@@ -118,7 +123,7 @@ def add_source(
         for q in suggested_questions:
             cleaned_q = validate_and_clean_text(
                 q,
-                MAX_SUGGESTED_QUESTION_LEN,
+                None,
                 required=True,
                 field_name="Suggested Question",
             )
@@ -129,6 +134,7 @@ def add_source(
     return crud.add_source(
         notebook_id,
         cleaned_filename,
+        cleaned_filetype or "pdf",
         file_path,
         file_hash,
         cleaned_summary,

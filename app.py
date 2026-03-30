@@ -16,6 +16,9 @@ from typing import List, Dict, Any, Optional
 from pathlib import Path
 
 from middlewares import db_middleware as db
+from langchain_ollama import OllamaLLM
+from langchain_core.documents import Document
+
 from core.configs import (
     APP_NAME,
     DB_ROOT_PATH,
@@ -23,12 +26,16 @@ from core.configs import (
     USER_ROLE_NAME,
     ASSISTANT_ROLE_NAME,
     LLM_BASE_URL,
+    LLM_MODEL_NAME,
+    LLM_TEMPERATURE,
+    LLM_NUM_CTX,
 )
 from core.utils import (
     format_relative_time,
-    hash_pdf_file,
+    hash_file_content,
+    detect_file_type,
     check_file_already_exists_in_notebook,
-    chunk_and_process_pdf,
+    chunk_and_process_file,
     create_vectorstore_from_chunks,
     merge_vectorstores,
     save_source_to_database,
@@ -312,14 +319,37 @@ def initialize_session_state():
         st.session_state.rename_source_name = None
 
 
-def generate_summary(rag_chain: Any) -> str:
-    """Generate a brief summary of the document."""
+def generate_summary(chunks: List[Document]) -> str:
+    """Generate a brief summary of the document using Top-K Slicing."""
     try:
+        # Get the first 3 chunks (or fewer if the document is very short)
+        top_k_chunks = chunks[:3]
+        context_text = "\n\n".join([chunk.page_content for chunk in top_k_chunks])
+
         summary_prompt = (
-            "Provide a brief 2-3 sentence summary of the main topics in this document."
+            f"Please read the following text extracted from the beginning of a document.\n"
+            f"Provide a brief 2-3 sentence summary of the main topics in this document.\n\n"
+            f"TEXT:\n{context_text}\n\n"
+            f"SUMMARY:"
         )
-        summary = rag_chain.invoke(summary_prompt)
-        return summary[:300]  # Limit length
+
+        # Initialize standalone LLM
+        llm = OllamaLLM(
+            model=LLM_MODEL_NAME,
+            base_url=LLM_BASE_URL,
+            temperature=LLM_TEMPERATURE,
+            num_ctx=LLM_NUM_CTX,
+        )
+
+        summary = llm.invoke(summary_prompt)
+
+        summary = (
+            summary.replace("[FOUND_ANSWER: true]", "")
+            .replace("[FOUND_ANSWER: false]", "")
+            .replace("[FOUND_ANSWER: general]", "")
+            .strip()
+        )
+        return summary
     except Exception as e:
         logger.error(f"Summary generation failed: {str(e)}")
         return "Unable to generate summary."
@@ -334,6 +364,14 @@ def generate_suggested_questions(rag_chain: Any) -> List[str]:
         )
         response = rag_chain.invoke(question_prompt)
 
+        if isinstance(response, str):
+            response = (
+                response.replace("[FOUND_ANSWER: true]", "")
+                .replace("[FOUND_ANSWER: false]", "")
+                .replace("[FOUND_ANSWER: general]", "")
+                .strip()
+            )
+
         questions: List[str] = []
         for line in response.split("\n"):
             if line.strip() and (line[0].isdigit() or line.startswith("-")):
@@ -347,7 +385,7 @@ def generate_suggested_questions(rag_chain: Any) -> List[str]:
         return []
 
 
-def process_pdf(uploaded_file: Any, filename: str, print_debug: bool = False) -> bool:
+def process_file(uploaded_file: Any, filename: str, print_debug: bool = False) -> bool:
     """Process a PDF: extract, chunk, embed, merge with existing data."""
     tmp_path = None
     file_bytes = None
@@ -362,7 +400,13 @@ def process_pdf(uploaded_file: Any, filename: str, print_debug: bool = False) ->
         else:
             file_bytes = uploaded_file.read()
 
-        file_hash = hash_pdf_file(file_bytes)
+        file_hash = hash_file_content(file_bytes)
+
+        try:
+            file_type = detect_file_type(file_bytes)
+        except ValueError as e:
+            st.error(f"❌ {e}")
+            return False
 
         # Check if this exact file was already uploaded to THIS notebook
         existing_source = check_file_already_exists_in_notebook(
@@ -375,13 +419,15 @@ def process_pdf(uploaded_file: Any, filename: str, print_debug: bool = False) ->
             )
             return False
 
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=f".{file_type}") as tmp:
             tmp.write(file_bytes)
             tmp_path = tmp.name
 
         with st.spinner(f"Processing '{filename}'..."):
             # Load and chunk
-            chunks, num_chunks = chunk_and_process_pdf(tmp_path, filename, print_debug)
+            chunks, num_chunks = chunk_and_process_file(
+                tmp_path, file_type, filename, print_debug
+            )
 
             # Embed with GPU/CPU fallback
             logger.info(f"Creating embeddings for {num_chunks} chunks")
@@ -409,7 +455,7 @@ def process_pdf(uploaded_file: Any, filename: str, print_debug: bool = False) ->
 
             # Generate summary
             logger.info(f"Generating summary for {filename}")
-            summary = generate_summary(st.session_state.rag_chain)
+            summary = generate_summary(chunks)
 
             # Generate suggested questions
             logger.info(f"Generating suggested questions for {filename}")
@@ -432,6 +478,7 @@ def process_pdf(uploaded_file: Any, filename: str, print_debug: bool = False) ->
             source_id = save_source_to_database(
                 notebook_id,
                 filename,
+                file_type,
                 file_hash,
                 summary,
                 suggested_questions,
@@ -508,8 +555,8 @@ def source_hub_ui(print_debug: bool = False):
 
     st.markdown("#### Upload Documents")
     uploaded_files = st.file_uploader(
-        "Select PDF files",
-        type=["pdf"],
+        "Select PDF or DOCX files",
+        type=["pdf", "docx"],
         accept_multiple_files=True,
         key=f"file_uploader_{st.session_state.file_uploader_key}",
         label_visibility="collapsed",
@@ -532,7 +579,7 @@ def source_hub_ui(print_debug: bool = False):
         for uploaded_file in uploaded_files:
             filename = uploaded_file.name
             file_bytes = uploaded_file.getvalue()
-            file_hash = hash_pdf_file(file_bytes)
+            file_hash = hash_file_content(file_bytes)
 
             # Check for duplicates by hash (not filename) to handle renamed files correctly
             existing_source = check_file_already_exists_in_notebook(
@@ -576,9 +623,9 @@ def source_hub_ui(print_debug: bool = False):
                 files_to_process = list(pending_new.items())
                 for fname, fbytes in files_to_process:
                     del pending_new[fname]
-                    process_pdf(
+                    process_file(
                         fbytes, fname, PRINT_DEBUG
-                    )  # process_pdf handles its own spinner
+                    )  # process_file handles its own spinner
                 st.rerun()
         with col_cancel_all:
             if st.button("Cancel All", key="cancel_all_new", use_container_width=True):
@@ -602,9 +649,9 @@ def source_hub_ui(print_debug: bool = False):
                 ):
                     file_bytes_new: bytes = pending_new[filename]
                     del pending_new[filename]
-                    process_pdf(
+                    process_file(
                         file_bytes_new, filename, PRINT_DEBUG
-                    )  # process_pdf handles its own spinner
+                    )  # process_file handles its own spinner
                     st.rerun()
             with col_cancel:
                 if st.button(
@@ -673,7 +720,7 @@ def source_hub_ui(print_debug: bool = False):
                     )
 
                     # Phase 2: Insert the new one
-                    process_pdf(file_bytes, filename, True)
+                    process_file(file_bytes, filename, True)
 
                     status_placeholder.empty()
                     st.rerun()
@@ -758,7 +805,10 @@ def source_hub_ui(print_debug: bool = False):
 
                 with col_expand:
                     # Expandable details section
-                    with st.expander(f"📄 {file_name}", expanded=False):
+                    expander_title = f"📄 {file_name[:40] + '...' if len(file_name) > 40 else file_name}"
+                    with st.expander(expander_title, expanded=False):
+                        if len(file_name) > 40:
+                            st.caption(f"**Full Name:** {file_name}")
                         if doc_info.get("summary"):
                             st.caption(f"**Summary:** {doc_info['summary']}")
 
@@ -925,14 +975,29 @@ def chat_interface(notebook_name: str, print_debug: bool = False):
         # Display suggested questions only if chat is empty and no query is pending/running
         if not st.session_state.chat_history and not user_query:
             with suggestions_placeholder.container():
-                first_doc = list(st.session_state.documents.keys())[0]
-                doc_info = st.session_state.documents[first_doc]
+                import random
 
-                if doc_info.get("suggested_questions"):
+                # Gather all suggested questions from specifically selected sources
+                all_suggested_questions: List[str] = []
+                for src_id in st.session_state.selected_sources:
+                    doc_info = st.session_state.documents.get(src_id, {})
+                    qs = doc_info.get("suggested_questions")
+                    if qs:
+                        all_suggested_questions.extend(qs)
+
+                if all_suggested_questions:
+                    # Deduplicate and pick up to 3 random questions
+                    unique_questions = list(set(all_suggested_questions))
+                    num_to_pick = min(3, len(unique_questions))
+                    selected_qs = random.sample(unique_questions, num_to_pick)
+
                     st.markdown("#### 💡 Suggested Questions")
-                    for question in doc_info["suggested_questions"]:
+                    for question in selected_qs:
+                        button_label = (
+                            question if len(question) <= 150 else question[:150] + "..."
+                        )
                         if st.button(
-                            question,
+                            button_label,
                             use_container_width=False,
                             key=f"suggested_{hash(question)}",
                         ):
@@ -981,8 +1046,14 @@ def chat_interface(notebook_name: str, print_debug: bool = False):
             unsafe_allow_html=True,
         )
 
+    # DETECT INTERRUPTED GENERATIONS: If the last message in history is from a User without an Assistant response
+    needs_answer = False
+    query_to_answer = ""
+    # We slice out the last message if it's the pending query, but we also handle brand new inputs.
     if user_query:
-        # Add user message to history
+        query_to_answer = user_query
+        needs_answer = True
+        # Save user message immediately
         db.add_chat_message(
             notebook_id=st.session_state.current_notebook_id,
             role=USER_ROLE_NAME,
@@ -991,27 +1062,51 @@ def chat_interface(notebook_name: str, print_debug: bool = False):
         st.session_state.chat_history.append(
             {"role": USER_ROLE_NAME, "content": user_query, "sources": None}
         )
-
         # Display user message immediately
         with chat_container:
             render_user_message(user_query)
+    elif (
+        len(st.session_state.chat_history) > 0
+        and st.session_state.chat_history[-1]["role"] == USER_ROLE_NAME
+    ):
+        needs_answer = True
+        query_to_answer = st.session_state.chat_history[-1]["content"]
+        # It's already rendered via the loop above!
 
+    if needs_answer:
         # Generate answer
         if st.session_state.rag_chain is None:
-            st.error(
-                "❌ RAG Chain not initialized. Please ensure documents are loaded."
+            error_msg = "⚠️ Generation interrupted or RAG Chain not initialized. Please ensure documents are selected and ask your question again."
+            db.add_chat_message(
+                notebook_id=st.session_state.current_notebook_id,
+                role=ASSISTANT_ROLE_NAME,
+                content=error_msg,
+                sources=None,
+                found_answer=False,
             )
+            st.session_state.chat_history.append(
+                {
+                    "role": ASSISTANT_ROLE_NAME,
+                    "content": error_msg,
+                    "sources": None,
+                    "found_answer": False,
+                }
+            )
+            st.rerun()
         else:
             with chat_container:
                 with st.spinner("🤔 Thinking..."):
                     try:
                         # Get answer and sources via RAG chain with chat history context
-                        logger.info(f"Processing query: {user_query[:50]}...")
+                        logger.info(f"Processing query: {query_to_answer[:50]}...")
+                        # Exclude the current query from the chat history passed for context!
+                        history_context = st.session_state.chat_history[:-1]
+
                         answer, sources, found_answer = process_user_query(
-                            user_query,
+                            query_to_answer,
                             st.session_state.rag_chain,
                             st.session_state.vectorstore,
-                            chat_history=st.session_state.chat_history,
+                            chat_history=history_context,
                             print_debug=print_debug,
                         )
 
@@ -1058,7 +1153,7 @@ def chat_interface(notebook_name: str, print_debug: bool = False):
                             "cuda" in error_msg.lower()
                             or "out of memory" in error_msg.lower()
                         ):
-                            st.error(
+                            display_error = (
                                 "❌ GPU Memory Error: The model ran out of GPU memory. "
                                 "Please try:\n"
                                 "1. Asking a simpler question\n"
@@ -1068,7 +1163,23 @@ def chat_interface(notebook_name: str, print_debug: bool = False):
                                 f"Technical details: {error_msg}"
                             )
                         else:
-                            st.error(f"❌ Error: {error_msg}")
+                            display_error = f"❌ Error: {error_msg}"
+
+                        db.add_chat_message(
+                            notebook_id=st.session_state.current_notebook_id,
+                            role=ASSISTANT_ROLE_NAME,
+                            content=display_error,
+                            sources=None,
+                            found_answer=False,
+                        )
+                        st.session_state.chat_history.append(
+                            {
+                                "role": ASSISTANT_ROLE_NAME,
+                                "content": display_error,
+                                "sources": None,
+                                "found_answer": False,
+                            }
+                        )
 
         # Rerun to refresh chat display
         st.rerun()
@@ -1193,9 +1304,12 @@ def create_notebook_modal():
         if not new_name.strip():
             st.error("Notebook name cannot be empty.")
         else:
-            new_id = db.create_notebook(new_name, new_desc)
-            st.session_state.loading_notebook_id = new_id
-            st.rerun()
+            try:
+                new_id = db.create_notebook(new_name, new_desc)
+                st.session_state.loading_notebook_id = new_id
+                st.rerun()
+            except ValueError as e:
+                st.error(f"❌ {str(e)}")
 
 
 @st.dialog("Rename Notebook")
