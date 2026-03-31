@@ -18,10 +18,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Suggested Questions UI**: Improved display of `source.suggested_questions` by randomly picking up to 3 questions across all available resources rather than just the first resource.
 - **Summary Generation Strategy**: Modified the `source.summary` generation process to use a more efficient "Top-K Slicing" method instead of semantic search, improving summary relevance.
+- **UI Processing Uploaded Sources Enhancement**: Use progress bar loading while processing uploaded sources to improve user experience and provide feedback on long-running operations.
+- **Emojis For Displayed Messages**: Added visual appealing emojis to various user-facing messages to enhance the UI and make it more engaging (e.g., success, error, info states).
 
 ### Fixed
 
 - **Input Text Truncation Handling**: Prevented silent truncation of user input before saving to the database by throwing an explicit error when limits are exceeded. Ensured LLM-generated fields like `source.summary` and `source.suggested_questions` are not restricted by truncation, preserving data integrity.
+- **Middle Floating `Add Note` Button**: Repositioned the "Add Note" button to a fixed position at the bottom center of the section to improve visibility and accessibility, especially when there are no existing notes.
+- **Unattended Suggested Questions Truncation Display**: Remove auto truncated display of suggested questions and always show full questions in the UI, ensuring users can see all generated suggestions without confusion.
 
 ## [1.0.0] - 2026-03-25
 
