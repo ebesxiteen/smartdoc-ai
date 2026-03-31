@@ -647,8 +647,8 @@ def source_hub_ui(print_debug: bool = False):
         st.session_state.pending_new_uploads = {}
 
     # Typed alias — mutations propagate back to session_state via dict reference
-    pending_repls: Dict[str, bytes] = st.session_state.pending_replacements  # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
-    pending_new: Dict[str, bytes] = st.session_state.pending_new_uploads  # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+    pending_repls: Dict[str, bytes] = st.session_state.pending_replacements # type: ignore
+    pending_new: Dict[str, bytes] = st.session_state.pending_new_uploads # type: ignore
 
     if uploaded_files:
         new_pending_replacements = False
@@ -1061,34 +1061,12 @@ def source_hub_ui(print_debug: bool = False):
                                     type="secondary",
                                     use_container_width=True,
                                 ):
-                                    with st.spinner(f"Removing {file_name}..."):
-                                        logger.info(f"Removing document: {file_name}")
-                                        db.delete_source(source_id)
-                                        source_dir = get_source_vectorstore_dir(
-                                            st.session_state.current_notebook_id,
-                                            source_id,
-                                        )
-                                        if source_dir.exists():
-                                            import shutil
-
-                                            shutil.rmtree(
-                                                source_dir, ignore_errors=True
-                                            )
-
-                                        # Remove from selected sources if selected
-                                        st.session_state.selected_sources.discard(
-                                            source_id
-                                        )
-
-                                        del st.session_state.documents[source_id]
-
-                                        # Reload vectorstore
-                                        reload_vectorstore_and_chain(
-                                            st.session_state.current_notebook_id,
-                                            st.session_state.selected_sources,
-                                            print_debug,
-                                        )
-                                        st.rerun()
+                                    confirm_delete_source_dialog(
+                                        source_id,
+                                        file_name,
+                                        st.session_state.current_notebook_id,
+                                        print_debug,
+                                    )
 
                 with col_check:
                     # Checkbox on the RIGHT side
@@ -1158,13 +1136,7 @@ def chat_interface(notebook_name: str, print_debug: bool = False):
                 use_container_width=True,
                 disabled=not has_messages,
             ):
-                with st.spinner("Clearing chat history..."):
-                    # Delete from database
-                    db.delete_chat_history(st.session_state.current_notebook_id)
-                    # Clear session state
-                    st.session_state.chat_history = []
-                st.success("✅ Chat history cleared!")
-                st.rerun()
+                confirm_delete_chat_history_dialog(st.session_state.current_notebook_id)
 
     st.caption(f"Notebook: **{notebook_name}**")
 
@@ -1425,18 +1397,21 @@ def create_note_modal():
     content = st.text_area("Content", placeholder="Write your note here...", height=200)
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("Cancel", use_container_width=True):
-            st.rerun()
+        cancel_click = st.button("Cancel", use_container_width=True)
     with col2:
-        if st.button("Save", type="primary", use_container_width=True):
-            try:
-                db.add_note(st.session_state.current_notebook_id, title, content)
-                st.session_state.saved_notes = db.get_notes_for_notebook(
-                    st.session_state.current_notebook_id
-                )
-                st.rerun()
-            except ValueError as e:
-                st.error(str(e))
+        save_click = st.button("Save", type="primary", use_container_width=True)
+
+    if cancel_click:
+        st.rerun()
+    if save_click:
+        try:
+            db.add_note(st.session_state.current_notebook_id, title, content)
+            st.session_state.saved_notes = db.get_notes_for_notebook(
+                st.session_state.current_notebook_id
+            )
+            st.rerun()
+        except ValueError as e:
+            st.error(str(e))
 
 
 @st.dialog("Edit Note")
@@ -1445,20 +1420,25 @@ def edit_note_modal(note_id: str, current_title: str, current_content: str):
     content = st.text_area("Content", value=current_content or "", height=200)
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("Cancel", key="edit_note_cancel", use_container_width=True):
-            st.rerun()
+        cancel_click = st.button(
+            "Cancel", key="edit_note_cancel", use_container_width=True
+        )
     with col2:
-        if st.button(
+        save_click = st.button(
             "Save", key="edit_note_save", type="primary", use_container_width=True
-        ):
-            try:
-                db.update_note(note_id, title=title, content=content)
-                st.session_state.saved_notes = db.get_notes_for_notebook(
-                    st.session_state.current_notebook_id
-                )
-                st.rerun()
-            except ValueError as e:
-                st.error(str(e))
+        )
+
+    if cancel_click:
+        st.rerun()
+    if save_click:
+        try:
+            db.update_note(note_id, title=title, content=content)
+            st.session_state.saved_notes = db.get_notes_for_notebook(
+                st.session_state.current_notebook_id
+            )
+            st.rerun()
+        except ValueError as e:
+            st.error(str(e))
 
 
 def notes_panel_ui():
@@ -1501,11 +1481,9 @@ def notes_panel_ui():
                             type="secondary",
                             use_container_width=True,
                         ):
-                            db.delete_note(note["id"])
-                            st.session_state.saved_notes = db.get_notes_for_notebook(
-                                st.session_state.current_notebook_id
+                            confirm_delete_note_dialog(
+                                note["id"], st.session_state.current_notebook_id
                             )
-                            st.rerun()
         else:
             st.info("🛸 No notes yet.")
 
@@ -1565,32 +1543,32 @@ def rename_notebook_modal(
 
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("Cancel", use_container_width=True):
-            st.rerun()
-
+        cancel_click = st.button("Cancel", use_container_width=True)
     with col2:
-        if st.button("Save", type="primary", use_container_width=True):
-            try:
-                # Pass through middleware for validation
-                db.rename_notebook(
-                    notebook_id,
-                    new_name if new_name != current_name else None,
-                    (
-                        new_description
-                        if new_description != (current_description or "")
-                        else None
-                    ),
-                )
-                st.success("✅ Notebook renamed successfully!")
-                st.session_state.notebooks = (
-                    db.get_all_notebooks()
-                )  # Reload notebook list
-                st.rerun()
-            except ValueError as e:
-                st.error(f"❌ {str(e)}")
-            except Exception as e:
-                logger.error(f"Error renaming notebook {notebook_id}: {str(e)}")
-                st.error(f"Error renaming notebook: {str(e)}")
+        save_click = st.button("Save", type="primary", use_container_width=True)
+
+    if cancel_click:
+        st.rerun()
+    if save_click:
+        try:
+            # Pass through middleware for validation
+            db.rename_notebook(
+                notebook_id,
+                new_name if new_name != current_name else None,
+                (
+                    new_description
+                    if new_description != (current_description or "")
+                    else None
+                ),
+            )
+            st.success("✅ Notebook renamed successfully!")
+            st.session_state.notebooks = db.get_all_notebooks()  # Reload notebook list
+            st.rerun()
+        except ValueError as e:
+            st.error(f"❌ {str(e)}")
+        except Exception as e:
+            logger.error(f"Error renaming notebook {notebook_id}: {str(e)}")
+            st.error(f"Error renaming notebook: {str(e)}")
 
 
 def rename_source_modal(source_id: str, current_name: str):
@@ -1605,17 +1583,18 @@ def rename_source_modal(source_id: str, current_name: str):
 
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("Cancel", use_container_width=True):
-            st.session_state.rename_source_modal_open = False
-            st.rerun()
-
+        cancel_click = st.button("Cancel", use_container_width=True)
     with col2:
-        if st.button("Save", type="primary", use_container_width=True):
-            try:
-                if new_name == current_name:
-                    st.warning("No changes made.")
-                    return
+        save_click = st.button("Save", type="primary", use_container_width=True)
 
+    if cancel_click:
+        st.session_state.rename_source_modal_open = False
+        st.rerun()
+    if save_click:
+        try:
+            if new_name == current_name:
+                st.warning("No changes made.")
+            else:
                 # Pass through middleware for validation
                 db.rename_source(source_id, new_name)
                 st.success("✅ Source renamed successfully!")
@@ -1626,11 +1605,11 @@ def rename_source_modal(source_id: str, current_name: str):
 
                 st.session_state.rename_source_modal_open = False
                 st.rerun()
-            except ValueError as e:
-                st.error(f"❌ {str(e)}")
-            except Exception as e:
-                logger.error(f"Error renaming source {source_id}: {str(e)}")
-                st.error(f"Error renaming source: {str(e)}")
+        except ValueError as e:
+            st.error(f"❌ {str(e)}")
+        except Exception as e:
+            logger.error(f"Error renaming source {source_id}: {str(e)}")
+            st.error(f"Error renaming source: {str(e)}")
 
 
 @st.dialog("Rename Source", width="small")
@@ -1640,6 +1619,117 @@ def show_rename_source_dialog():
         rename_source_modal(
             st.session_state.rename_source_id, st.session_state.rename_source_name or ""
         )
+
+
+# ============================================================================
+# DELETION CONFIRMATION DIALOGS
+# ============================================================================
+
+
+@st.dialog("Confirm Deletion", width="small")
+def confirm_delete_notebook_dialog(nb_id: str, nb_name: str):
+    """Dialog to confirm deletion of a notebook."""
+    st.warning(
+        f"Are you sure you want to delete the notebook **{nb_name}**? This action cannot be undone."
+    )
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Cancel", key=f"cancel_del_nb_{nb_id}", use_container_width=True):
+            st.rerun()
+    with col2:
+        if st.button(
+            "Confirm",
+            key=f"confirm_del_nb_{nb_id}",
+            type="primary",
+            use_container_width=True,
+        ):
+            delete_notebook_callback(nb_id)
+            st.rerun()
+
+
+@st.dialog("Confirm Deletion", width="small")
+def confirm_delete_source_dialog(
+    source_id: str, file_name: str, notebook_id: str, print_debug: bool
+):
+    """Dialog to confirm deletion of a source."""
+    st.warning(
+        f"Are you sure you want to delete **{file_name}**? This action cannot be undone."
+    )
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button(
+            "Cancel", key=f"cancel_del_src_{source_id}", use_container_width=True
+        ):
+            st.rerun()
+    with col2:
+        if st.button(
+            "Confirm",
+            key=f"confirm_del_src_{source_id}",
+            type="primary",
+            use_container_width=True,
+        ):
+            with st.spinner(f"Removing {file_name}..."):
+                logger.info(f"Removing document: {file_name}")
+                db.delete_source(source_id)
+                source_dir = get_source_vectorstore_dir(notebook_id, source_id)
+                if source_dir.exists():
+                    import shutil
+
+                    shutil.rmtree(source_dir, ignore_errors=True)
+                st.session_state.selected_sources.discard(source_id)
+                if source_id in st.session_state.documents:
+                    del st.session_state.documents[source_id]
+                reload_vectorstore_and_chain(
+                    notebook_id, st.session_state.selected_sources, print_debug
+                )
+            st.rerun()
+
+
+@st.dialog("Confirm Deletion", width="small")
+def confirm_delete_chat_history_dialog(notebook_id: str):
+    """Dialog to confirm clearing chat history."""
+    st.warning(
+        "Are you sure you want to delete all chat history for this notebook? This action cannot be undone."
+    )
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Cancel", key="cancel_clear_chat", use_container_width=True):
+            st.rerun()
+    with col2:
+        if st.button(
+            "Confirm",
+            key="confirm_clear_chat",
+            type="primary",
+            use_container_width=True,
+        ):
+            with st.spinner("Clearing chat history..."):
+                db.delete_chat_history(notebook_id)
+                st.session_state.chat_history = []
+            st.rerun()
+
+
+@st.dialog("Confirm Deletion", width="small")
+def confirm_delete_note_dialog(note_id: str, notebook_id: str):
+    """Dialog to confirm deletion of a note."""
+    st.warning(
+        "Are you sure you want to delete this note? This action cannot be undone."
+    )
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button(
+            "Cancel", key=f"cancel_del_note_{note_id}", use_container_width=True
+        ):
+            st.rerun()
+    with col2:
+        if st.button(
+            "Confirm",
+            key=f"confirm_del_note_{note_id}",
+            type="primary",
+            use_container_width=True,
+        ):
+            db.delete_note(note_id)
+            st.session_state.saved_notes = db.get_notes_for_notebook(notebook_id)
+            st.rerun()
 
 
 # ============================================================================
@@ -1697,8 +1787,7 @@ def render_dashboard():
                                 type="secondary",
                                 use_container_width=True,
                             ):
-                                delete_notebook_callback(nb["id"])
-                                st.rerun()
+                                confirm_delete_notebook_dialog(nb["id"], nb["name"])
                             if st.button(
                                 "Edit",
                                 key=f"edit_{nb['id']}",
