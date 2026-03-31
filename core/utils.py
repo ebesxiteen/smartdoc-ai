@@ -45,7 +45,9 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_classic.chains import create_history_aware_retriever
 from pathlib import Path
 import re
-from langdetect import detect  # pyright: ignore[reportMissingTypeStubs, reportUnknownVariableType]
+from langdetect import (  # pyright: ignore[reportMissingTypeStubs]
+    detect,  # pyright: ignore[reportUnknownVariableType]
+)
 import docx
 
 logger = logging.getLogger(__name__)
@@ -709,7 +711,9 @@ def create_rag_chain(vectorstore: FAISS, print_debug: bool = False) -> Any:
 
     def get_query(q: Any) -> str:
         if isinstance(q, dict):
-            return str(q.get("input", q.get("question", "")))  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]
+            return str(
+                q.get("input", q.get("question", ""))  # type: ignore
+            )
         return str(q)
 
     # Step 4: Build the chain using LCEL
@@ -1094,6 +1098,11 @@ def create_history_aware_rag_chain(
     )  # type: ignore[misc]
 
     # Step 6: Build the complete chain
+    def get_query_str(q: Any) -> str:
+        if isinstance(q, dict):
+            return str(q.get("input", q.get("question", "")))  # type: ignore
+        return str(q)
+
     # If chat history is provided, use the history-aware flow
     if chat_history:
         formatted_history: List[BaseMessage] = format_chat_history_for_rephrase(
@@ -1129,7 +1138,7 @@ def create_history_aware_rag_chain(
             {
                 "context": RunnableLambda(
                     lambda query: format_context_with_sources(  # type: ignore[misc]
-                        docs=quality_retriever(str(query)),
+                        docs=quality_retriever(get_query_str(query)),
                         print_debug=print_debug,
                     )
                 ),
