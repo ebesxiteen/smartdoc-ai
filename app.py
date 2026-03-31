@@ -4,6 +4,7 @@ SmartDoc AI - Local NotebookLM-Inspired Document Intelligence System
 A privacy-first RAG application for querying documents with source citations.
 """
 
+import time
 import html
 
 import streamlit as st
@@ -12,7 +13,7 @@ import tempfile
 import logging
 import requests
 import uuid
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Callable
 from pathlib import Path
 
 from middlewares import db_middleware as db
@@ -78,6 +79,26 @@ st.set_page_config(
 st.markdown(
     """
 <style>
+    /* Progress Bar */
+    div[data-testid="stProgress"] {
+        height: 6px !important;
+        margin-bottom: 10px;
+    }
+    /* The track (background) of the progress bar */
+    div[data-testid="stProgress"] > div > div {
+        background-color: #cccccc !important;
+    }
+    /* The filled portion of the progress bar */
+    div[data-testid="stProgress"] > div > div > div > div {
+        background-color: #000000 !important;
+    }
+    .progress-status-text {
+        font-size: 0.9rem;
+        color: #444444;
+        margin-bottom: 5px;
+        font-weight: 500;
+    }
+
     /* Compact mode - reduce all padding and spacing */
     .block-container {
         padding-top: 2rem;
@@ -204,6 +225,31 @@ st.markdown(
         background-color: #f4faf2;
         border-radius: 10px;
         padding: 0.75rem !important;
+        position: relative !important;
+        padding-bottom: 4rem !important; /* reserve space for fixed button */
+    }
+
+    /* Target the marker div's parent container and pin the NEXT container (which holds the button) to bottom */
+    div[data-testid="stElementContainer"]:has(.add-note-btn-anchor) + div[data-testid="stElementContainer"] {
+        position: absolute;
+        bottom: 0.75rem;
+        left: 0.75rem;
+        right: 0.75rem;
+        width: auto !important; /* let left/right dictate width */
+    }
+
+    /* Target the wrapper for suggested questions and ensure the buttons inside can wrap their text freely */
+    div[data-testid="stVerticalBlock"]:has(.suggested-questions-wrapper) [data-testid="stButton"] button {
+        height: auto !important;
+        white-space: normal !important;
+        word-wrap: break-word !important;
+        text-align: left !important;
+        padding-top: 0.5rem !important;
+        padding-bottom: 0.5rem !important;
+    }
+    div[data-testid="stVerticalBlock"]:has(.suggested-questions-wrapper) [data-testid="stButton"] button p {
+        white-space: normal !important;
+        word-wrap: break-word !important;
     }
 </style>
 """,
@@ -385,7 +431,12 @@ def generate_suggested_questions(rag_chain: Any) -> List[str]:
         return []
 
 
-def process_file(uploaded_file: Any, filename: str, print_debug: bool = False) -> bool:
+def process_file(
+    uploaded_file: Any,
+    filename: str,
+    print_debug: bool = False,
+    progress_callback: Optional[Callable[[str], None]] = None,
+) -> bool:
     """Process a PDF: extract, chunk, embed, merge with existing data."""
     tmp_path = None
     file_bytes = None
@@ -423,19 +474,37 @@ def process_file(uploaded_file: Any, filename: str, print_debug: bool = False) -
             tmp.write(file_bytes)
             tmp_path = tmp.name
 
-        with st.spinner(f"Processing '{filename}'..."):
+        import contextlib
+
+        @contextlib.contextmanager
+        def optional_spinner():
+            if progress_callback:
+                yield
+            else:
+                with st.spinner(f"Processing '{filename}'..."):
+                    yield
+
+        with optional_spinner():
             # Load and chunk
             chunks, num_chunks = chunk_and_process_file(
-                tmp_path, file_type, filename, print_debug
+                tmp_path,
+                file_type,
+                filename,
+                print_debug,
+                progress_callback=progress_callback,
             )
 
             # Embed with GPU/CPU fallback
             logger.info(f"Creating embeddings for {num_chunks} chunks")
+            if progress_callback:
+                progress_callback("Loading embedding model...")
             embeddings = try_load_embeddings()
             if embeddings is None:
                 st.error("Failed to load embedding model. Please check your system.")
                 return False
 
+            if progress_callback:
+                progress_callback("Creating vector store...")
             new_vectorstore = create_vectorstore_from_chunks(
                 chunks, embeddings, print_debug
             )
@@ -501,6 +570,15 @@ def process_file(uploaded_file: Any, filename: str, print_debug: bool = False) -
 
             # Add the new source to selected sources (auto-select)
             st.session_state.selected_sources.add(source_id)
+
+            if (
+                "documents" in st.session_state
+                and "selected_sources" in st.session_state
+            ):
+                all_ids = set(st.session_state.documents.keys())
+                st.session_state["select_all_sources"] = (
+                    st.session_state.selected_sources == all_ids
+                )
 
             # Reload vectorstore with the new selection
             reload_vectorstore_and_chain(
@@ -612,53 +690,166 @@ def source_hub_ui(print_debug: bool = False):
 
         pending_new_files: List[str] = list(pending_new.keys())
 
-        col_process_all, col_cancel_all = st.columns(2)
-        with col_process_all:
-            if st.button(
-                "Process All",
-                key="process_all_new",
-                use_container_width=True,
-                type="primary",
-            ):
-                files_to_process = list(pending_new.items())
-                for fname, fbytes in files_to_process:
-                    del pending_new[fname]
-                    process_file(
-                        fbytes, fname, PRINT_DEBUG
-                    )  # process_file handles its own spinner
-                st.rerun()
-        with col_cancel_all:
-            if st.button("Cancel All", key="cancel_all_new", use_container_width=True):
-                pending_new.clear()
+        action_buttons_container = st.empty()
+        process_all_clicked = False
+        cancel_all_clicked = False
+
+        with action_buttons_container.container():
+            col_process_all, col_cancel_all = st.columns(2)
+            with col_process_all:
+                process_all_clicked = st.button(
+                    "Process All",
+                    key="process_all_new",
+                    use_container_width=True,
+                    type="primary",
+                )
+            with col_cancel_all:
+                cancel_all_clicked = st.button(
+                    "Cancel All", key="cancel_all_new", use_container_width=True
+                )
+
+        files_list_container = st.empty()
+
+        if cancel_all_clicked:
+            pending_new.clear()
+            st.rerun()
+
+        if process_all_clicked:
+            action_buttons_container.empty()
+            files_list_container.empty()
+
+            files_to_process = list(pending_new.items())
+            num_files = len(files_to_process)
+
+            status_text = st.empty()
+            progress_bar = st.progress(0.0)
+
+            for i, (fname, fbytes) in enumerate(files_to_process):
+                del pending_new[fname]
+
+                base_progress = i / num_files
+                prog_state = {"val": 0.0}
+
+                def update_granular_status(status_message: str):
+                    file_list_html = ""
+                    for j, (fname_iter, _) in enumerate(files_to_process):
+                        if j < i:
+                            # Already processed
+                            file_list_html += f"<div style='color: green; font-size: 0.85em; margin-bottom: 2px;'>✨ {fname_iter}</div>"
+                        elif j == i:
+                            # Currently processing
+                            file_list_html += f"<div style='color: black; font-weight: 500; font-size: 0.85em; margin-bottom: 2px;'>🚀 {fname_iter} <br><span style='font-size: 0.9em; font-weight: normal; color: #444; margin-left: 15px;'>↳ <i>{status_message}</i></span></div>"
+                        else:
+                            # Pending
+                            file_list_html += f"<div style='color: #999; font-size: 0.85em; margin-bottom: 2px;'>⚡ {fname_iter}</div>"
+
+                    status_text.markdown(
+                        f"<div class='progress-status-text' style='margin-bottom: 10px;'><b>Processing {num_files} files:</b><br>{file_list_html}</div>",
+                        unsafe_allow_html=True,
+                    )
+
+                    max_val_for_file = 0.95 / num_files
+                    remaining = max_val_for_file - prog_state["val"]
+                    prog_state["val"] += remaining * 0.1
+
+                    current_val = min(base_progress + prog_state["val"], 1.0)
+                    progress_bar.progress(current_val)
+
+                update_granular_status("Initializing...")
+
+                process_file(
+                    fbytes,
+                    fname,
+                    PRINT_DEBUG,
+                    progress_callback=update_granular_status,
+                )
+
+                progress_bar.progress(min((i + 1) / num_files, 1.0))
+
+            status_text.markdown(
+                "<div class='progress-status-text'>⭐ All documents processed successfully!</div>",
+                unsafe_allow_html=True,
+            )
+
+            time.sleep(1.5)
+            progress_bar.empty()
+            status_text.empty()
+            st.rerun()
+
+        else:
+            process_clicked_file = None
+            cancel_clicked_file = None
+
+            with files_list_container.container():
+                for filename in pending_new_files:
+                    col_name, col_proc, col_cancel = st.columns(
+                        [3, 2, 2], vertical_alignment="center"
+                    )
+                    with col_name:
+                        st.markdown(
+                            f'<p style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin:0;font-size:0.9em;">📄 {filename}</p>',
+                            unsafe_allow_html=True,
+                        )
+                    with col_proc:
+                        if st.button(
+                            "Process",
+                            key=f"process_new_{filename}",
+                            use_container_width=True,
+                        ):
+                            process_clicked_file = filename
+                    with col_cancel:
+                        if st.button(
+                            "Cancel",
+                            key=f"cancel_new_{filename}",
+                            use_container_width=True,
+                        ):
+                            cancel_clicked_file = filename
+
+            if cancel_clicked_file:
+                del pending_new[cancel_clicked_file]
                 st.rerun()
 
-        for filename in pending_new_files:
-            col_name, col_proc, col_cancel = st.columns(
-                [3, 2, 2], vertical_alignment="center"
-            )
-            with col_name:
-                st.markdown(
-                    f'<p style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin:0;font-size:0.9em;">📄 {filename}</p>',
+            if process_clicked_file:
+                files_list_container.empty()
+                action_buttons_container.empty()
+
+                filename = process_clicked_file
+                file_bytes_new: bytes = pending_new[filename]
+                del pending_new[filename]
+
+                status_text = st.empty()
+                progress_bar = st.progress(0.0)
+
+                prog_state = {"val": 0.0}
+
+                def update_granular_status(status_message: str):
+                    status_text.markdown(
+                        f"<div class='progress-status-text'><b>Processing:</b> {filename} <br> ↳ <i>{status_message}</i></div>",
+                        unsafe_allow_html=True,
+                    )
+                    remaining = 0.95 - prog_state["val"]
+                    prog_state["val"] += remaining * 0.1
+                    progress_bar.progress(prog_state["val"])
+
+                update_granular_status("Initializing...")
+
+                process_file(
+                    file_bytes_new,
+                    filename,
+                    PRINT_DEBUG,
+                    progress_callback=update_granular_status,
+                )
+
+                progress_bar.progress(1.0)
+                status_text.markdown(
+                    "<div class='progress-status-text'>[Success] Document processed successfully!</div>",
                     unsafe_allow_html=True,
                 )
-            with col_proc:
-                if st.button(
-                    "Process",
-                    key=f"process_new_{filename}",
-                    use_container_width=True,
-                ):
-                    file_bytes_new: bytes = pending_new[filename]
-                    del pending_new[filename]
-                    process_file(
-                        file_bytes_new, filename, PRINT_DEBUG
-                    )  # process_file handles its own spinner
-                    st.rerun()
-            with col_cancel:
-                if st.button(
-                    "Cancel", key=f"cancel_new_{filename}", use_container_width=True
-                ):
-                    del pending_new[filename]
-                    st.rerun()
+
+                time.sleep(1.0)
+                progress_bar.empty()
+                status_text.empty()
+                st.rerun()
 
     # Show pending replacements if any are saved in session state
     if pending_repls:
@@ -671,13 +862,13 @@ def source_hub_ui(print_debug: bool = False):
             source_info = st.session_state.documents.get(source_id, {})
             filename = source_info.get("file_name", "Unknown")
 
-            container = st.container()
-            with container:
+            replacement_container = st.empty()
+            replace_clicked = False
+            cancel_clicked = False
+
+            with replacement_container.container():
                 st.warning(f"**{filename}** is already loaded.")
                 col_btn1, col_btn2 = st.columns(2)
-
-                # We use a placeholder for spinner so it doesn't get constrained simply to the column
-                status_placeholder = st.empty()
 
                 with col_btn1:
                     replace_clicked = st.button(
@@ -688,42 +879,73 @@ def source_hub_ui(print_debug: bool = False):
                         "Cancel", key=f"cancel_{source_id}", use_container_width=True
                     )
 
-                if replace_clicked:
-                    status_placeholder.info(
-                        f"⏳ Replacing '{filename}'... Please wait."
+            if cancel_clicked:
+                del pending_repls[source_id]
+                st.rerun()
+
+            if replace_clicked:
+                replacement_container.empty()
+                file_bytes: bytes = pending_repls[source_id]
+
+                # Remove the file from pending immediately so it doesn't get processed again
+                del pending_repls[source_id]
+
+                status_text = st.empty()
+                progress_bar = st.progress(0.0)
+
+                prog_state = {"val": 0.0}
+
+                def update_granular_status(status_message: str):
+                    status_text.markdown(
+                        f"<div class='progress-status-text'><b>Replacing:</b> {filename} <br> ↳ <i>{status_message}</i></div>",
+                        unsafe_allow_html=True,
                     )
-                    file_bytes: bytes = pending_repls[source_id]
+                    remaining = 0.95 - prog_state["val"]
+                    prog_state["val"] += remaining * 0.1
+                    progress_bar.progress(prog_state["val"])
 
-                    # Remove the file from pending immediately so it doesn't get processed again
-                    del pending_repls[source_id]
+                update_granular_status("Removing old version...")
 
-                    # Phase 1: Remove old version
-                    if source_id in st.session_state.documents:
-                        db.delete_source(source_id)
-                        source_dir = get_source_vectorstore_dir(
-                            st.session_state.current_notebook_id, source_id
-                        )
-                        if source_dir.exists():
-                            import shutil
-
-                            shutil.rmtree(source_dir, ignore_errors=True)
-
-                        # Remove from selected sources if it was selected
-                        st.session_state.selected_sources.discard(source_id)
-                        del st.session_state.documents[source_id]
-
-                    # Reload updated vectorstore with filtered selection
-                    reload_vectorstore_and_chain(
-                        st.session_state.current_notebook_id,
-                        st.session_state.selected_sources,
-                        print_debug,
+                # Phase 1: Remove old version
+                if source_id in st.session_state.documents:
+                    db.delete_source(source_id)
+                    source_dir = get_source_vectorstore_dir(
+                        st.session_state.current_notebook_id, source_id
                     )
+                    if source_dir.exists():
+                        import shutil
 
-                    # Phase 2: Insert the new one
-                    process_file(file_bytes, filename, True)
+                        shutil.rmtree(source_dir, ignore_errors=True)
 
-                    status_placeholder.empty()
-                    st.rerun()
+                    # Remove from selected sources if it was selected
+                    st.session_state.selected_sources.discard(source_id)
+                    del st.session_state.documents[source_id]
+
+                # Reload updated vectorstore with filtered selection
+                reload_vectorstore_and_chain(
+                    st.session_state.current_notebook_id,
+                    st.session_state.selected_sources,
+                    print_debug,
+                )
+
+                # Phase 2: Insert the new one
+                process_file(
+                    file_bytes,
+                    filename,
+                    True,
+                    progress_callback=update_granular_status,
+                )
+
+                progress_bar.progress(1.0)
+                status_text.markdown(
+                    "<div class='progress-status-text'>[Success] Document replaced successfully!</div>",
+                    unsafe_allow_html=True,
+                )
+
+                time.sleep(1.0)
+                progress_bar.empty()
+                status_text.empty()
+                st.rerun()
 
                 if cancel_clicked:
                     del pending_repls[source_id]
@@ -733,6 +955,13 @@ def source_hub_ui(print_debug: bool = False):
 
     if st.session_state.documents:
         # "Select all sources" row with checkbox on the right (matching NotebookLM style)
+        all_ids = {di["id"] for di in st.session_state.documents.values()}
+        if "selected_sources" in st.session_state:
+            st.session_state["select_all_sources"] = (
+                len(st.session_state.selected_sources) == len(all_ids)
+                and len(all_ids) > 0
+            )
+
         def on_select_all_change():
             """Handle select-all checkbox state change."""
             checked = st.session_state["select_all_sources"]
@@ -871,14 +1100,14 @@ def source_hub_ui(print_debug: bool = False):
                         label_visibility="collapsed",
                     )
     else:
-        st.info("No documents loaded yet.")
+        st.info("🔴 No documents loaded yet.")
 
     st.markdown("#### System Status")
 
     if st.session_state.ollama_ready:
-        st.success("Ollama: Connected")
+        st.success("🟢 Ollama: Connected")
     else:
-        st.error("Ollama: Offline")
+        st.error("🔴 Ollama: Offline")
         st.caption("Run: ollama serve")
 
     st.caption(
@@ -940,7 +1169,7 @@ def chat_interface(notebook_name: str, print_debug: bool = False):
     st.caption(f"Notebook: **{notebook_name}**")
 
     if not st.session_state.documents:
-        st.info("Upload documents in the Source Hub to get started.")
+        st.info("🚀 Upload documents in the Source Hub to get started.")
         return
 
     # Check if any sources are selected
@@ -992,17 +1221,19 @@ def chat_interface(notebook_name: str, print_debug: bool = False):
                     selected_qs = random.sample(unique_questions, num_to_pick)
 
                     st.markdown("#### 💡 Suggested Questions")
-                    for question in selected_qs:
-                        button_label = (
-                            question if len(question) <= 150 else question[:150] + "..."
+                    with st.container():
+                        st.markdown(
+                            '<div class="suggested-questions-wrapper"></div>',
+                            unsafe_allow_html=True,
                         )
-                        if st.button(
-                            button_label,
-                            use_container_width=False,
-                            key=f"suggested_{hash(question)}",
-                        ):
-                            st.session_state.pending_query = question
-                            st.rerun()
+                        for question in selected_qs:
+                            if st.button(
+                                question,
+                                use_container_width=True,
+                                key=f"suggested_{hash(question)}",
+                            ):
+                                st.session_state.pending_query = question
+                                st.rerun()
 
         else:
             suggestions_placeholder.empty()
@@ -1244,7 +1475,7 @@ def notes_panel_ui():
         if note_count:
             st.caption(f"{note_count} note{'s' if note_count != 1 else ''}")
 
-    # Fixed-height scroll area — always rendered so "Add Note" stays at the bottom
+    # Fixed-height scroll area — match the exact Chat column height so "Add Note" stays pinned nicely at the bottom
     with st.container(height=580, border=False):
         if st.session_state.saved_notes:
             for note in st.session_state.saved_notes:
@@ -1276,8 +1507,9 @@ def notes_panel_ui():
                             )
                             st.rerun()
         else:
-            st.info("No notes yet.")
+            st.info("🛸 No notes yet.")
 
+    st.markdown('<div class="add-note-btn-anchor"></div>', unsafe_allow_html=True)
     if st.button("+ Add Note", type="primary", use_container_width=True):
         create_note_modal()
 
@@ -1343,9 +1575,11 @@ def rename_notebook_modal(
                 db.rename_notebook(
                     notebook_id,
                     new_name if new_name != current_name else None,
-                    new_description
-                    if new_description != (current_description or "")
-                    else None,
+                    (
+                        new_description
+                        if new_description != (current_description or "")
+                        else None
+                    ),
                 )
                 st.success("✅ Notebook renamed successfully!")
                 st.session_state.notebooks = (
@@ -1428,7 +1662,7 @@ def render_dashboard():
 
     if not notebooks:
         st.info(
-            f"Welcome to {APP_NAME}! Create your first notebook below to get started."
+            f"🚀 Welcome to {APP_NAME}! Create your first notebook below to get started."
         )
     else:
         # Display as a grid using columns

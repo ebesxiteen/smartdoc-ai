@@ -6,7 +6,7 @@ Includes: PDF processing, chat handling, vectorstore management, and text cleani
 from datetime import datetime, timezone
 import hashlib
 import uuid
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple, Callable
 import logging
 
 import streamlit as st
@@ -78,6 +78,7 @@ def load_and_chunk_file(
     chunk_size: int = RAG_MAX_CHUNK_LENGTH,
     chunk_overlap: int = RAG_CHUNK_OVERLAP,
     print_debug: bool = False,
+    progress_callback: Optional[Callable[[str], None]] = None,
 ):
     """
     Load a file (PDF or DOCX) and chunk it into overlapping segments.
@@ -90,11 +91,16 @@ def load_and_chunk_file(
       List of Document objects with chunked text
     """
     # Step 1: Load the Document
-    documents = []
+    documents: List[Document] = []
     if file_type == "pdf":
         loader = PyMuPDFLoader(file_path)
-        documents = loader.load()
+        for i, page in enumerate(loader.lazy_load()):
+            documents.append(page)
+            if progress_callback:
+                progress_callback(f"Reading page {i + 1}...")
     elif file_type == "docx":
+        if progress_callback:
+            progress_callback("Reading DOCX file...")
         doc = docx.Document(file_path)
         full_text: List[str] = []
         for para in doc.paragraphs:
@@ -117,6 +123,8 @@ def load_and_chunk_file(
         print(f"   Total characters: {sum(len(d.page_content) for d in documents)}")
 
     # Step 2: Split into chunks
+    if progress_callback:
+        progress_callback("Chunking text...")
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
@@ -178,12 +186,21 @@ def check_file_already_exists_in_notebook(
 
 
 def chunk_and_process_file(
-    file_path: str, file_type: str, filename: str, print_debug: bool = False
+    file_path: str,
+    file_type: str,
+    filename: str,
+    print_debug: bool = False,
+    progress_callback: Optional[Callable[[str], None]] = None,
 ) -> Tuple[List[Document], int]:
     """Load File, chunk it, and add metadata."""
     if print_debug:
         logger.info(f"Loading and chunking {file_type.upper()}: {filename}")
-    chunks = load_and_chunk_file(file_path, file_type, print_debug=print_debug)
+    chunks = load_and_chunk_file(
+        file_path,
+        file_type,
+        print_debug=print_debug,
+        progress_callback=progress_callback,
+    )
 
     # Add document name to metadata
     for chunk in chunks:
@@ -1090,9 +1107,11 @@ def create_history_aware_rag_chain(
                     lambda x: format_context_with_sources(
                         docs=history_aware_retriever.invoke(  # type: ignore[attr-defined]
                             {
-                                "input": str(x.get("input", ""))  # type: ignore[union-attr]
-                                if isinstance(x, dict)
-                                else "",
+                                "input": (
+                                    str(x.get("input", ""))  # type: ignore[union-attr]
+                                    if isinstance(x, dict)
+                                    else ""
+                                ),
                                 "chat_history": formatted_history,
                             }
                         ),
