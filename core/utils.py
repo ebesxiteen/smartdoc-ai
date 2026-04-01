@@ -27,6 +27,7 @@ from core.configs import (
     LLM_PROMPT_TEMPLATE,
     LLM_TEMPERATURE,
     MAX_MSG_HISTORY,
+    NOT_FOUND_ANSWER_FALL_BACK,
     RAG_CHUNK_OVERLAP,
     RAG_MAX_CHUNK_LENGTH,
     RAG_MAX_CONTEXT_LENGTH,
@@ -353,20 +354,28 @@ def process_user_query(
     answer_clean = answer
     is_general_answer = is_greeting_query
 
-    # Check for [FOUND_ANSWER: true] tag
-    if "[FOUND_ANSWER: true]" in answer:
+    # Check for tags using robust regex (handles FIND_ANSWER and case variations)
+    if re.search(r"\[(?:FOUND|FIND)_ANSWER:\s*true\]", answer, flags=re.IGNORECASE):
         found_answer = True
-        answer_clean = answer.replace("[FOUND_ANSWER: true]", "").strip()
-    # Check for [FOUND_ANSWER: false] tag
-    elif "[FOUND_ANSWER: false]" in answer:
+    elif re.search(
+        r"\[(?:FOUND|FIND)_ANSWER:\s*false\]", answer, flags=re.IGNORECASE
+    ) or re.search(
+        r"\[(?:FOUND|FIND)_ANSWER:\s*general\]", answer, flags=re.IGNORECASE
+    ):
         found_answer = False
-        answer_clean = answer.replace("[FOUND_ANSWER: false]", "").strip()
         is_general_answer = True
-    # Check for [FOUND_ANSWER: general] tag (new general knowledge marker)
-    elif "[FOUND_ANSWER: general]" in answer:
-        found_answer = False
-        answer_clean = answer.replace("[FOUND_ANSWER: general]", "").strip()
-        is_general_answer = True
+
+    # Strip out any tags and clean up
+    answer_clean = re.sub(
+        r"\[(?:FOUND|FIND)_ANSWER:\s*(?:true|false|general)\]",
+        "",
+        answer,
+        flags=re.IGNORECASE,
+    ).strip()
+
+    # Prevent 'Content cannot be empty' DB error if LLM only returned a tag in rare cases
+    if not answer_clean:
+        answer_clean = NOT_FOUND_ANSWER_FALL_BACK
 
     if print_debug:
         if found_answer:

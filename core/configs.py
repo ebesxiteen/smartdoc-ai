@@ -23,6 +23,9 @@ EMBEDDING_MODEL_NAME = "sentence-transformers/paraphrase-multilingual-mpnet-base
 # Maximum number of past messages (user + assistant) to keep in conversation history for context (higher = more context but may cause CUDA OOM)
 MAX_MSG_HISTORY = 10
 
+# Use this answer as a fallback when LLM generate an empty response after tag removal (in random rare cases), to prevent DB insertion error and ensure user gets a response even if LLM fails to generate text
+NOT_FOUND_ANSWER_FALL_BACK = "Sorry, I couldn't find any relevant information in the documents to answer your question. Please try rephrasing or ask about a different topic."
+
 # ============================================================================
 # MULTI-LANGUAGE GREETING PATTERNS
 # ============================================================================

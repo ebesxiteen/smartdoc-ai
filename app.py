@@ -13,6 +13,7 @@ import tempfile
 import logging
 import requests
 import uuid
+import re
 from typing import List, Dict, Any, Optional, Callable
 from pathlib import Path
 
@@ -389,12 +390,7 @@ def generate_summary(chunks: List[Document]) -> str:
 
         summary = llm.invoke(summary_prompt)
 
-        summary = (
-            summary.replace("[FOUND_ANSWER: true]", "")
-            .replace("[FOUND_ANSWER: false]", "")
-            .replace("[FOUND_ANSWER: general]", "")
-            .strip()
-        )
+        summary = re.sub(r"\[(?:FOUND|FIND)_ANSWER:\s*(?:true|false|general)\]", "", summary, flags=re.IGNORECASE).strip()
         return summary
     except Exception as e:
         logger.error(f"Summary generation failed: {str(e)}")
@@ -411,12 +407,7 @@ def generate_suggested_questions(rag_chain: Any) -> List[str]:
         response = rag_chain.invoke(question_prompt)
 
         if isinstance(response, str):
-            response = (
-                response.replace("[FOUND_ANSWER: true]", "")
-                .replace("[FOUND_ANSWER: false]", "")
-                .replace("[FOUND_ANSWER: general]", "")
-                .strip()
-            )
+            response = re.sub(r"\[(?:FOUND|FIND)_ANSWER:\s*(?:true|false|general)\]", "", response, flags=re.IGNORECASE).strip()
 
         questions: List[str] = []
         for line in response.split("\n"):
