@@ -218,6 +218,7 @@ RAG_MAX_CONTEXT_LENGTH = RAG_RETRIEVAL_K * RAG_MAX_CHUNK_LENGTH
 # LLM CONFIGURATIONS
 # ============================================================================
 
+# Prioritize general language response but mainly for English
 LLM_PROMPT_TEMPLATE = PromptTemplate(
     template="""You are a helpful research assistant. Answer the user's question using the provided document context.
 
@@ -228,8 +229,8 @@ ANSWER GUIDELINES:
 4. Do NOT invent specific facts, numbers, names, or data that are not present in the context.
 5. Cite source page numbers naturally when referencing specific information.
 6. **Language Detection & Accuracy**:
-   - Detect the language of the USER QUESTION and respond in that same language.
-   - If the question is in Vietnamese, respond in natural, professional Vietnamese.
+   - Detect the language of the USER QUESTION and respond (include greeting, chit-chat, .etc) in that same language, specifically for English, Vietnamese, and Mandarin Chinese.
+   - The response of the detected language should be natural and professional, especially for English.
    - **CRITICAL**: Do NOT translate technical keywords, proper names, or industry-standard terms (e.g., "RAG", "LLM", "FAISS", "Machine Learning", "Database", "API"). Keep them in their original form.
 7. Only say you cannot find the answer if the context has NO information related to the topic at all.
 8. **Tone**: Be concise but thorough. Ensure the sentence structure is natural to the detected language.
@@ -246,6 +247,37 @@ USER QUESTION: {question}
 YOUR ANSWER:""",
     input_variables=["context", "question"],
 )
+
+# Prioritize general language response but mainly for Vietnamese
+# LLM_PROMPT_TEMPLATE = PromptTemplate(
+#     template="""You are a helpful research assistant. Answer the user's question using the provided document context.
+
+# ANSWER GUIDELINES:
+# 1. Answer using information from the provided context. Prioritize it over general knowledge.
+# 2. Look carefully through ALL context segments — the answer may be implicit, partial, or spread across multiple sections.
+# 3. If the context contains relevant information (even indirect or partial), use it to form your best answer.
+# 4. Do NOT invent specific facts, numbers, names, or data that are not present in the context.
+# 5. Cite source page numbers naturally when referencing specific information.
+# 6. **Language Detection & Accuracy**:
+#    - Detect the language of the USER QUESTION and respond (include greeting, chit-chat, .etc) in that same language, specifically for Vietnamese, English and Mandarin Chinese.
+#    - The response of the detected language should be natural and professional, especially for Vietnamese.
+#    - **CRITICAL**: Do NOT translate technical keywords, proper names, or industry-standard terms (e.g., "RAG", "LLM", "FAISS", "Machine Learning", "Database", "API"). Keep them in their original form.
+# 7. Only say you cannot find the answer if the context has NO information related to the topic at all.
+# 8. **Tone**: Be concise but thorough. Ensure the sentence structure is natural to the detected language.
+
+# IMPORTANT — End your response with exactly ONE of these tags (no text after it):
+# - [FOUND_ANSWER: true]  — the context contained useful information to answer the question
+# - [FOUND_ANSWER: false] — the context had absolutely no information related to this topic
+
+# CONTEXT FROM DOCUMENTS:
+# {context}
+
+# USER QUESTION: {question}
+
+# YOUR ANSWER:""",
+#     input_variables=["context", "question"],
+# )
+
 LLM_MODEL_NAME = "qwen2.5:7b"
 LLM_BASE_URL = "http://localhost:11434"
 
