@@ -13,45 +13,63 @@ import streamlit as st
 from langchain_core.documents import Document
 from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_ollama import OllamaLLM
 
-from core.configs import (
-    APP_NAME,
-    ASSISTANT_ROLE_NAME,
-    DEFAULT_EN_GREETING_PATTERNS,
-    EMBEDDING_MODEL_NAME,
-    GREETING_PATTERNS_BY_LANGUAGE,
-    LLM_BASE_URL,
-    LLM_MODEL_NAME,
-    LLM_NUM_CTX,
-    LLM_PROMPT_TEMPLATE,
-    LLM_TEMPERATURE,
-    MAX_MSG_HISTORY,
-    NOT_FOUND_ANSWER_FALL_BACK,
-    RAG_CHUNK_OVERLAP,
-    RAG_MAX_CHUNK_LENGTH,
-    RAG_MAX_CONTEXT_LENGTH,
-    RAG_RETRIEVAL_K,
-    RAG_RETRIEVAL_MIN_RESULTS,
-    RAG_RETRIEVAL_SCORE_THRESHOLD,
-    REPHRASE_PROMPT,
-    USER_ROLE_NAME,
-)
-from langchain_community.document_loaders import PyMuPDFLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_core.runnables import RunnablePassthrough, RunnableLambda
-from langchain_core.output_parsers import StrOutputParser
+import core.configs as cfg
+from langchain_core.runnables import RunnableLambda
 from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_classic.chains import create_history_aware_retriever
+from langchain_core.prompts import ChatPromptTemplate
 from pathlib import Path
 import re
 from langdetect import (  # pyright: ignore[reportMissingTypeStubs]
     detect,  # pyright: ignore[reportUnknownVariableType]
 )
-import docx
 
 logger = logging.getLogger(__name__)
+
+
+def get_default_notebook_settings() -> Dict[str, Any]:
+    return {
+        "rag_retrieval_k": cfg.RAG_RETRIEVAL_K,
+        "rag_retrieval_min_results": cfg.RAG_RETRIEVAL_MIN_RESULTS,
+        "rag_retrieval_score_threshold": cfg.RAG_RETRIEVAL_SCORE_THRESHOLD,
+        "rag_max_chunk_len": cfg.RAG_MAX_CHUNK_LEN,
+        "rag_chunk_overlap": cfg.RAG_CHUNK_OVERLAP,
+        "rag_max_ctx_len": cfg.RAG_MAX_CTX_LEN,
+        "max_msg_history": cfg.MAX_MSG_HISTORY,
+        "llm_model_name": cfg.LLM_MODEL_NAME,
+        "llm_num_ctx": cfg.LLM_NUM_CTX,
+        "llm_temp": cfg.LLM_TEMPERATURE,
+        "sys_prompt_override": None,
+    }
+
+
+def _load_notebook_settings(
+    notebook_id: Optional[str],
+) -> Dict[str, Any]:
+    defaults = get_default_notebook_settings()
+    if not notebook_id:
+        return defaults
+
+    from middlewares.db_middleware import get_notebook_settings
+
+    settings = get_notebook_settings(notebook_id)
+    if not settings:
+        return defaults
+
+    return {
+        "rag_retrieval_k": settings.get("rag_retrieval_k"),
+        "rag_retrieval_min_results": settings.get("rag_retrieval_min_results"),
+        "rag_retrieval_score_threshold": settings.get("rag_retrieval_score_threshold"),
+        "rag_max_chunk_len": settings.get("rag_max_chunk_len"),
+        "rag_chunk_overlap": settings.get("rag_chunk_overlap"),
+        "rag_max_ctx_len": settings.get("rag_max_ctx_len"),
+        "max_msg_history": settings.get("max_msg_history"),
+        "llm_model_name": settings.get("llm_model_name"),
+        "llm_num_ctx": settings.get("llm_num_ctx"),
+        "llm_temp": settings.get("llm_temp"),
+        "sys_prompt_override": settings.get("sys_prompt_override"),
+    }
+
 
 # ============================================================================
 # TEXT UTILITIES
@@ -78,8 +96,8 @@ def clean_spaces(text: str) -> str:
 def load_and_chunk_file(
     file_path: str,
     file_type: str,
-    chunk_size: int = RAG_MAX_CHUNK_LENGTH,
-    chunk_overlap: int = RAG_CHUNK_OVERLAP,
+    chunk_size: int = cfg.RAG_MAX_CHUNK_LEN,
+    chunk_overlap: int = cfg.RAG_CHUNK_OVERLAP,
     print_debug: bool = False,
     progress_callback: Optional[Callable[[str], None]] = None,
 ):
@@ -93,15 +111,21 @@ def load_and_chunk_file(
     Returns:
       List of Document objects with chunked text
     """
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+
     # Step 1: Load the Document
     documents: List[Document] = []
     if file_type == "pdf":
+        from langchain_community.document_loaders import PyMuPDFLoader
+
         loader = PyMuPDFLoader(file_path)
         for i, page in enumerate(loader.lazy_load()):
             documents.append(page)
             if progress_callback:
                 progress_callback(f"Reading page {i + 1}...")
     elif file_type == "docx":
+        import docx
+
         if progress_callback:
             progress_callback("Reading DOCX file...")
         doc = docx.Document(file_path)
@@ -194,6 +218,8 @@ def chunk_and_process_file(
     filename: str,
     print_debug: bool = False,
     progress_callback: Optional[Callable[[str], None]] = None,
+    chunk_size: int = cfg.RAG_MAX_CHUNK_LEN,
+    chunk_overlap: int = cfg.RAG_CHUNK_OVERLAP,
 ) -> Tuple[List[Document], int]:
     """Load File, chunk it, and add metadata."""
     if print_debug:
@@ -201,6 +227,8 @@ def chunk_and_process_file(
     chunks = load_and_chunk_file(
         file_path,
         file_type,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
         print_debug=print_debug,
         progress_callback=progress_callback,
     )
@@ -288,6 +316,7 @@ def process_user_query(
     vectorstore: FAISS,
     chat_history: Optional[List[Dict[str, Any]]] = None,
     print_debug: bool = False,
+    notebook_id: Optional[str] = None,
 ) -> tuple[str, List[Dict[str, Any]], bool]:
     """
     Process a user query through the RAG chain with optional chat history context.
@@ -299,42 +328,66 @@ def process_user_query(
 
     Returns:
         (answer, sources_list, found_answer)
-        - answer: The LLM's response (with [FOUND_ANSWER: ...] tag removed)
+        - answer: The LLM's response (with [STATUS: ...] tag removed)
         - sources_list: Top sources for display
         - found_answer: Boolean indicating if LLM found useful context (defaults to True if not specified)
     """
     if print_debug:
+        print("\n")
         logger.info(
-            f"🔡 Processing query: {query[:60]}..."
+            f"🔡\tProcessing query: {query[:60]}..."
             if len(query) > 60
-            else f"🔡 Processing query: {query}"
+            else f"🔡\tProcessing query: {query}"
         )
 
     # Step 1: Check if this is a greeting/general question
     is_greeting_query = is_greeting(query)
     if print_debug and is_greeting_query:
-        logger.info("👋 Detected greeting/general question - using general knowledge")
+        logger.info(
+            "👥💬\tDetected greeting/general question - using general knowledge"
+        )
+
+    settings = _load_notebook_settings(notebook_id)
 
     # Step 2: Prepare inputs for the RAG chain
     # Build chain input dict with proper structure for history-aware chain
-    chain_input_dict: Dict[str, Any] = {"input": query, "question": query}
+    # Using a list for retrieved_docs so we can safely extract it back from the chain
+    retrieved_docs: List[Document] = []
+    chain_input_dict: Dict[str, Any] = {
+        "input": query,
+        "question": query,
+        "__retrieved_docs__": retrieved_docs,
+        "is_greeting": is_greeting_query,
+    }
 
-    if chat_history and not is_greeting_query:
+    if chat_history:
         formatted_history = format_chat_history_for_rephrase(
-            chat_history, max_messages=MAX_MSG_HISTORY
+            chat_history, max_messages=int(settings["max_msg_history"])
         )
-        chain_input_dict["chat_history"] = formatted_history  # type: ignore[typeddict-unknown-key]
+        chain_input_dict["chat_history"] = formatted_history
         if print_debug:
+            logger.info("   " + "━" * 60)
             logger.info(
-                f"📜 Including {len(formatted_history)} history messages for context"
+                f"   📜\tIncluding {len(formatted_history)} history messages for context"
             )
+            for msg in formatted_history:
+                role_icon = "👤" if msg.type == "human" else "🤖"
+                content_str = str(msg.content)  # type: ignore
+                content_preview = content_str.replace("\n", " ")
+                content_preview = (
+                    content_preview[:70] + "..."
+                    if len(content_preview) > 70
+                    else content_preview
+                )
+                logger.info(f"      {role_icon}\t{content_preview}")
+            logger.info("   " + "━" * 60)
 
     # Step 3: Generate answer through RAG chain
     if print_debug:
         if is_greeting_query:
-            logger.info("⏳ Invoking RAG chain with general knowledge mode...")
+            logger.info("   ⏳\tInvoking RAG chain with general knowledge mode...")
         else:
-            logger.info("⏳ Invoking RAG chain with quality-filtered chunks...")
+            logger.info("   ⏳\tInvoking RAG chain with quality-filtered chunks...")
 
     try:
         # Invoke chain with proper input structure
@@ -344,30 +397,44 @@ def process_user_query(
         logger.error(f"Error invoking RAG chain: {e}")
         if print_debug:
             logger.error(f"    Full error: {str(e)}")
-        answer = f"[FOUND_ANSWER: false]\nI encountered an error processing your query: {str(e)}"
+        answer = f"[STATUS: DOC_MISSING]\nI encountered an error processing your query: {str(e)}"
 
     if print_debug:
-        logger.info(f"✅ LLM response generated ({len(answer)} chars)")
+        logger.info(f"   💬\tLLM response generated ({len(answer)} chars)")
 
-    # Step 4: Parse [FOUND_ANSWER: true/false/general] tag from answer
+        # Log the actual answer cleanly
+        logger.info("   " + "━" * 60)
+        logger.info("   🤖\tLLM Answer:")
+
+        # Split by newlines so it aligns cleanly in the terminal
+        for idx, line in enumerate(answer.split("\n")):
+            if line.strip():
+                # To prevent overwhelming logs, limit to first 10 lines max or 1000 chars
+                if idx > 9 or len(line) > 150:
+                    preview = line[:150] + "..." if len(line) > 150 else line
+                    logger.info(f"      {preview}")
+                else:
+                    logger.info(f"      {line}")
+        logger.info("   " + "━" * 60)
+
+    # Step 4: Parse [STATUS: DOC_ANSWER/DOC_MISSING/GENERAL] tag from answer
     found_answer = True  # Default to True
     answer_clean = answer
     is_general_answer = is_greeting_query
 
-    # Check for tags using robust regex (handles FIND_ANSWER and case variations)
-    if re.search(r"\[(?:FOUND|FIND)_ANSWER:\s*true\]", answer, flags=re.IGNORECASE):
+    # Check for tags using robust regex
+    if re.search(r"\[STATUS:\s*DOC_ANSWER\]", answer, flags=re.IGNORECASE):
         found_answer = True
-    elif re.search(
-        r"\[(?:FOUND|FIND)_ANSWER:\s*false\]", answer, flags=re.IGNORECASE
-    ) or re.search(
-        r"\[(?:FOUND|FIND)_ANSWER:\s*general\]", answer, flags=re.IGNORECASE
-    ):
+    elif re.search(r"\[STATUS:\s*DOC_MISSING\]", answer, flags=re.IGNORECASE):
+        found_answer = False
+        is_general_answer = False
+    elif re.search(r"\[STATUS:\s*GENERAL\]", answer, flags=re.IGNORECASE):
         found_answer = False
         is_general_answer = True
 
     # Strip out any tags and clean up
     answer_clean = re.sub(
-        r"\[(?:FOUND|FIND)_ANSWER:\s*(?:true|false|general)\]",
+        r"\[STATUS:\s*(?:DOC_ANSWER|DOC_MISSING|GENERAL)\]",
         "",
         answer,
         flags=re.IGNORECASE,
@@ -375,33 +442,40 @@ def process_user_query(
 
     # Prevent 'Content cannot be empty' DB error if LLM only returned a tag in rare cases
     if not answer_clean:
-        answer_clean = NOT_FOUND_ANSWER_FALL_BACK
+        answer_clean = cfg.NOT_FOUND_ANSWER_FALL_BACK
 
     if print_debug:
-        if found_answer:
-            logger.info("✅ LLM found relevant context - sources will be displayed")
+        if found_answer and not is_general_answer:
+            logger.info("   📍\tLLM found relevant context - sources will be displayed")
         elif is_general_answer:
-            logger.info("💡 LLM answered from general knowledge - no sources needed")
+            logger.info(
+                "   💬\tLLM answered from general knowledge - no sources needed"
+            )
         else:
             logger.warning(
-                "⚠️  LLM did not find relevant context - sources will be hidden"
+                "   ⚠️\tLLM did not find relevant context - sources will be hidden"
             )
 
     # Step 5: Retrieve source documents for display (only if not a general question)
     sources: List[Dict[str, Any]] = []
 
     if not is_general_answer and print_debug:
-        logger.info("📎 Retrieving quality-filtered sources for display...")
+        logger.info("   📎\tGathering exact retrieved sources for display...")
 
     if not is_general_answer:
-        source_docs = retrieve_quality_chunks(
-            vectorstore,
-            query,
-            k=RAG_RETRIEVAL_K,
-            min_results=RAG_RETRIEVAL_MIN_RESULTS,
-            score_threshold=RAG_RETRIEVAL_SCORE_THRESHOLD,
-            print_debug=print_debug,
-        )
+        # Use the exact documents retrieved during the RAG chain invoke
+        source_docs = chain_input_dict.get("__retrieved_docs__", [])
+
+        # Fallback just in case they weren't saved
+        if not source_docs:
+            source_docs = retrieve_quality_chunks(
+                vectorstore,
+                query,
+                k=settings["rag_retrieval_k"],
+                min_results=settings["rag_retrieval_min_results"],
+                score_threshold=settings["rag_retrieval_score_threshold"],
+                print_debug=print_debug,
+            )
 
         # Format sources for display
         for i, doc in enumerate(source_docs, 1):
@@ -417,12 +491,13 @@ def process_user_query(
             }
             sources.append(source_entry)
             if print_debug:
-                logger.debug(
-                    f"   Source {i}: {source_entry['document']} (Page {source_entry['page']})"
+                logger.info(
+                    f"      • Source {i}: {source_entry['document']} (Page {source_entry['page']})"
                 )
 
         if print_debug:
-            logger.info(f"✅ Retrieved {len(sources)} display sources")
+            logger.info("   " + "━" * 60)
+            logger.info(f"   ✅\tProcessed {len(sources)} display sources for UI")
 
     return answer_clean, sources, found_answer
 
@@ -443,14 +518,14 @@ def save_query_and_answer_to_history(
     # Save user message
     db.add_chat_message(
         notebook_id=notebook_id,
-        role=USER_ROLE_NAME,
+        role=cfg.USER_ROLE_NAME,
         content=query,
     )
 
     # Save assistant message with sources
     db.add_chat_message(
         notebook_id=notebook_id,
-        role=ASSISTANT_ROLE_NAME,
+        role=cfg.ASSISTANT_ROLE_NAME,
         content=answer,
         sources=sources,
     )
@@ -501,16 +576,16 @@ def get_source_vectorstore_dir(notebook_id: str, source_id: str) -> Path:
 def try_load_embeddings() -> Optional[HuggingFaceEmbeddings]:
     """Try to load embeddings with GPU, fallback to CPU on OOM."""
     try:
-        logger.info("Attempting to load embeddings on GPU")
+        logger.info("🔳\tAttempting to load embeddings on GPU")
         return HuggingFaceEmbeddings(
-            model_name=EMBEDDING_MODEL_NAME,
+            model_name=cfg.EMBEDDING_MODEL_NAME,
             model_kwargs={"device": "cuda"},
         )
     except Exception as e:
         logger.warning(f"GPU loading failed: {e}. Falling back to CPU...")
         try:
             return HuggingFaceEmbeddings(
-                model_name=EMBEDDING_MODEL_NAME,
+                model_name=cfg.EMBEDDING_MODEL_NAME,
                 model_kwargs={"device": "cpu"},
             )
         except Exception as e2:
@@ -521,9 +596,9 @@ def try_load_embeddings() -> Optional[HuggingFaceEmbeddings]:
 def retrieve_quality_chunks(
     vectorstore: FAISS,
     query: str,
-    k: int = RAG_RETRIEVAL_K,
-    min_results: int = RAG_RETRIEVAL_MIN_RESULTS,
-    score_threshold: float = RAG_RETRIEVAL_SCORE_THRESHOLD,
+    k: int = cfg.RAG_RETRIEVAL_K,
+    min_results: int = cfg.RAG_RETRIEVAL_MIN_RESULTS,
+    score_threshold: float = cfg.RAG_RETRIEVAL_SCORE_THRESHOLD,
     print_debug: bool = False,
 ) -> List[Document]:
     """
@@ -561,56 +636,68 @@ def retrieve_quality_chunks(
 
     for doc, score in results_with_scores:
         # Store similarity score in metadata for reference
-        doc.metadata["similarity_score"] = score  # type: ignore[index]
+        doc.metadata["similarity_score"] = score
 
         # Apply quality threshold: only include chunks with good similarity
         if score <= score_threshold:
             filtered_results.append(doc)
-            doc.metadata["passed_quality_threshold"] = True  # type: ignore[index]
+            doc.metadata["passed_quality_threshold"] = True
             passed_threshold += 1
         else:
             failed_threshold += 1
 
     if print_debug:
         logger.info(
-            f"   ✓ Passed threshold ({score_threshold}): {passed_threshold} chunks"
+            f"   ✅\tPassed threshold ({score_threshold}): {passed_threshold} chunks"
         )
-        logger.info(f"   ✗ Failed threshold: {failed_threshold} chunks")
+        logger.info(f"   ❌\tFailed threshold: {failed_threshold} chunks")
 
     # Step 3: Fallback mechanism - if threshold filtered too much, use top min_results
     if len(filtered_results) < min_results:
         if print_debug:
             logger.warning(
-                f"   ⚠️  Only {len(filtered_results)} chunks passed threshold. "
+                f"   ⚠️\tOnly {len(filtered_results)} chunks passed threshold. "
                 f"Falling back to top {min_results} results..."
             )
 
         filtered_results = []
         for doc, score in results_with_scores[:min_results]:
-            doc.metadata["similarity_score"] = score  # type: ignore[index]
-            doc.metadata["passed_quality_threshold"] = False  # type: ignore[index]
+            doc.metadata["similarity_score"] = score
+            doc.metadata["passed_quality_threshold"] = False
             filtered_results.append(doc)
 
     if print_debug:
-        logger.info(f"   ✅ Final selection: {len(filtered_results)} chunks\n")
+        logger.info(f"   ✅\tFinal selection: {len(filtered_results)} chunks")
+        logger.info("   " + "━" * 60)
 
         for i, doc in enumerate(filtered_results, 1):
             doc_metadata: Dict[str, Any] = doc.metadata  # type: ignore[assignment]
             score = doc_metadata.get("similarity_score", "N/A")
-            doc_name = doc_metadata.get("document", "Unknown")
-            page_num = doc_metadata.get("page", "N/A")
-            content_preview = doc.page_content[:80].replace("\n", " ")
 
-            logger.debug(f"   📄 Chunk {i}: {doc_name} (Page {page_num})")
+            # Extract clean filename
+            doc_name = doc_metadata.get(
+                "source", doc_metadata.get("document", "Unknown")
+            )
+            if "/" in str(doc_name) or "\\" in str(doc_name):
+                doc_name = Path(doc_name).name
+
+            page_num = doc_metadata.get("page", "N/A")
+            content_preview = doc.page_content[:85].replace("\n", " ").strip()
             score_str = f"{score:.4f}" if isinstance(score, float) else str(score)
-            logger.debug(f"      Distance: {score_str} | Content: {content_preview}...")
+
+            logger.info(
+                f"   📄\t[{i}] L2 Distance: {score_str} | {doc_name} (Page {page_num})"
+            )
+            logger.info(f'       "{content_preview}..."')
+
+        logger.info("   " + "━" * 60 + "\n")
 
     return filtered_results
 
 
 def format_context_with_sources(
     docs: List[Document],
-    max_chunk_length: int = RAG_MAX_CHUNK_LENGTH,
+    max_chunk_length: int = cfg.RAG_MAX_CHUNK_LEN,
     print_debug: bool = False,
 ) -> str:
     """
@@ -648,11 +735,11 @@ def format_context_with_sources(
         part_length = len(part)
 
         # Stop adding chunks if we exceed max total context length
-        if current_length + part_length > RAG_MAX_CONTEXT_LENGTH:
+        if current_length + part_length > cfg.RAG_MAX_CTX_LEN:
             if print_debug:
                 logger.debug(
                     f"   ⚠️  Max context length reached. Stopping at chunk {idx - 1}. "
-                    f"(Current: {current_length}B, Limit: {RAG_MAX_CONTEXT_LENGTH}B)"
+                    f"(Current: {current_length}B, Limit: {cfg.RAG_MAX_CTX_LEN}B)"
                 )
             break
 
@@ -671,87 +758,6 @@ def format_context_with_sources(
     return final_context
 
 
-def create_rag_chain(vectorstore: FAISS, print_debug: bool = False) -> Any:
-    """
-    Build the complete RAG chain: Quality Retriever → Format Context → Prompt → LLM
-
-    Uses intelligent quality-based chunk retrieval to maximize relevance while
-    preventing CUDA OOM errors through configurable limits.
-
-    Args:
-        vectorstore: FAISS vectorstore object
-
-    Returns:
-        Runnable chain object
-    """
-    if print_debug:
-        print("\n🔗 Building RAG Chain...")
-        print(
-            f"   Retrieval Config: k={RAG_RETRIEVAL_K}, min_results={RAG_RETRIEVAL_MIN_RESULTS}, threshold={RAG_RETRIEVAL_SCORE_THRESHOLD}"
-        )
-        print(
-            f"   Context Config: max_length={RAG_MAX_CONTEXT_LENGTH}, max_chunk={RAG_MAX_CHUNK_LENGTH}"
-        )
-        print(
-            f"   LLM Config: model={LLM_MODEL_NAME}, num_ctx={LLM_NUM_CTX}, temperature={LLM_TEMPERATURE}"
-        )
-
-    # Step 1: Create quality-based retriever (replaces basic vectorstore.as_retriever())
-    def quality_retriever(query: str) -> List[Document]:
-        return retrieve_quality_chunks(
-            vectorstore,
-            query,
-            k=RAG_RETRIEVAL_K,
-            min_results=RAG_RETRIEVAL_MIN_RESULTS,
-            score_threshold=RAG_RETRIEVAL_SCORE_THRESHOLD,
-            print_debug=print_debug,
-        )
-
-    # Step 2: Define the custom prompt template with source instructions
-    prompt_template = LLM_PROMPT_TEMPLATE
-
-    # Step 3: Initialize the LLM (Ollama running Qwen2.5)
-    llm = OllamaLLM(
-        model=LLM_MODEL_NAME,
-        base_url=LLM_BASE_URL,
-        temperature=LLM_TEMPERATURE,
-        num_ctx=LLM_NUM_CTX,
-    )
-
-    def get_query(q: Any) -> str:
-        if isinstance(q, dict):
-            return str(
-                q.get("input", q.get("question", ""))  # type: ignore
-            )
-        return str(q)
-
-    # Step 4: Build the chain using LCEL
-    # This chains: question → quality_retriever → format context → prompt → llm → output
-    rag_chain: Any = (  # type: ignore
-        {
-            "context": RunnableLambda(
-                lambda query: format_context_with_sources(
-                    docs=quality_retriever(get_query(query)),
-                    print_debug=print_debug,
-                )
-            ),
-            "question": RunnableLambda(get_query),
-        }
-        | prompt_template
-        | llm
-        | StrOutputParser()
-    )
-
-    if print_debug:
-        print("   ✅ RAG Chain created!")
-        print("\n   Chain Flow:")
-        print(
-            "   Question → Quality Retriever (Threshold + Fallback) → Context Formatter → Prompt → LLM (Qwen2.5) → Answer"
-        )
-
-    return rag_chain
-
-
 def reload_vectorstore_and_chain(
     notebook_id: str,
     selected_sources: Set[str],
@@ -763,8 +769,10 @@ def reload_vectorstore_and_chain(
     )
 
     if st.session_state.vectorstore is not None:
-        st.session_state.rag_chain = create_rag_chain(
-            st.session_state.vectorstore, print_debug
+        st.session_state.rag_chain = create_history_aware_rag_chain(
+            st.session_state.vectorstore,
+            print_debug=print_debug,
+            notebook_id=notebook_id,
         )
     else:
         st.session_state.rag_chain = None
@@ -866,7 +874,7 @@ def is_greeting(user_query: str) -> bool:
 
         # Map detected language codes to our supported languages
         # langdetect uses ISO 639-1 codes: 'en', 'vi', 'zh-cn', 'zh-tw', etc.
-        if detected_lang.startswith("zh"):  # type: ignore[union-attr]
+        if detected_lang.startswith("zh"):
             lang_code = "zh"  # Both Simplified and Traditional Chinese
         elif detected_lang in ("en", "vi"):
             lang_code = detected_lang
@@ -875,8 +883,8 @@ def is_greeting(user_query: str) -> bool:
             lang_code = "en"
 
         # Get language-specific patterns
-        patterns = GREETING_PATTERNS_BY_LANGUAGE.get(
-            lang_code, DEFAULT_EN_GREETING_PATTERNS
+        patterns = cfg.GREETING_PATTERNS_BY_LANGUAGE.get(
+            lang_code, cfg.DEFAULT_EN_GREETING_PATTERNS
         )
 
         for pattern in patterns:
@@ -890,14 +898,14 @@ def is_greeting(user_query: str) -> bool:
         logger.debug(
             f"Language detection failed: {e}. Using English patterns as fallback."
         )
-        for pattern in DEFAULT_EN_GREETING_PATTERNS:
+        for pattern in cfg.DEFAULT_EN_GREETING_PATTERNS:
             if re.match(pattern, query_lower):
                 return True
         return False
 
 
 def format_chat_history_for_rephrase(
-    chat_history: List[Dict[str, Any]], max_messages: int = MAX_MSG_HISTORY
+    chat_history: List[Dict[str, Any]], max_messages: int = cfg.MAX_MSG_HISTORY
 ) -> List[BaseMessage]:
     """
     Convert database chat history to LangChain message format for history-aware retriever.
@@ -916,132 +924,18 @@ def format_chat_history_for_rephrase(
 
     # Use only the latest max_messages to avoid context overflow
     for msg in chat_history[-max_messages:]:
-        if msg["role"] == USER_ROLE_NAME:
+        if msg["role"] == cfg.USER_ROLE_NAME:
             messages.append(HumanMessage(content=msg["content"]))
-        elif msg["role"] == ASSISTANT_ROLE_NAME:
+        elif msg["role"] == cfg.ASSISTANT_ROLE_NAME:
             messages.append(AIMessage(content=msg["content"]))
 
     return messages
 
 
-def condense_question_with_history(
-    current_question: str,
-    chat_history: List[BaseMessage],
-    llm: OllamaLLM,
-    print_debug: bool = False,
-) -> str:
-    """
-    Rephrase a question using chat history to make it standalone.
-
-    Converts conversational questions like "What about the second point?" into
-    "What about the second point regarding photosynthesis?" by referencing prior context.
-
-    Args:
-        current_question: The current user question
-        chat_history: Formatted chat history (LangChain messages)
-        llm: OllamaLLM instance
-        print_debug: Enable debug logging
-
-    Returns:
-        Rephrased standalone version of the question
-    """
-    if not chat_history:
-        # No history, return original question
-        return current_question
-
-    if print_debug:
-        logger.info(
-            f"🔄 Condensing question with {len(chat_history)} history messages..."
-        )
-
-    # Prompt that instructs the LLM to rephrase the question
-    rephrase_prompt: ChatPromptTemplate = ChatPromptTemplate.from_messages(  # type: ignore[misc]
-        [
-            (
-                "system",
-                "Given a chat history and the latest user question which might reference context from previous messages, "
-                "formulate a standalone question which can be understood without the chat history. "
-                "Keep it concise and preserve all important details from the original question. "
-                "Do NOT answer the question, just rephrase it to be standalone.",
-            ),
-            MessagesPlaceholder("chat_history"),
-            ("human", "{input}"),
-        ]
-    )
-
-    # Build the rephrasing chain
-    rephrase_chain: Any = rephrase_prompt | llm  # type: ignore[operator]
-
-    # Invoke with chat history and current question
-    condensed: str = rephrase_chain.invoke(  # type: ignore[attr-defined]
-        {
-            "chat_history": chat_history,
-            "input": current_question,
-        }
-    )
-
-    if print_debug:
-        logger.info(f"✅ Original: {current_question}")
-        logger.info(f"✅ Condensed: {condensed}")
-
-    return condensed
-
-
-def get_enhanced_system_prompt() -> str:
-    """
-    Get enhanced system prompt with current time and general knowledge permission.
-
-    Returns a modified LLM prompt that:
-    1. Includes current timestamp for time-aware questions
-    2. Permits the LLM to answer general questions from its own knowledge
-    3. Maintains strict grounding for document-based questions
-
-    Returns:
-        Enhanced system prompt string
-    """
-    current_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-
-    enhanced_prompt = f"""You are {APP_NAME} - a helpful research assistant.
-Current Time: {current_time}
-
-ANSWER GUIDELINES:
-1. **For Document Questions**: Use the provided context to answer. Prioritize it over general knowledge.
-   - Look carefully through ALL context segments — the answer may be implicit or spread across multiple sections.
-   - If the context contains relevant information (even indirect), use it to form your best answer.
-   - Do NOT invent specific facts, numbers, names, or data that are not present in the context.
-   - Cite source page numbers naturally when referencing specific information.
-
-2. **For General Questions**: If the user asks about greetings, your capabilities, the current time/date, or general knowledge:
-   - Answer politely using your general knowledge (no document context needed).
-   - Be helpful and conversational naturally without searching documents.
-
-3. **Language & Tone**:
-   - Answer in the same language as the question (Vietnamese, English, etc.).
-   - Be concise but thorough.
-
-4. **Unknown Answers**:
-   - Only say you cannot find the answer in documents if the context has NO information related to the topic.
-   - For general questions, you can use your knowledge to provide a helpful response.
-
-IMPORTANT — End your response with exactly ONE of these tags (no text after it):
-- [FOUND_ANSWER: true]  — the context contained useful information to answer the question
-- [FOUND_ANSWER: false] — the context had no relevant information, but you answered from general knowledge
-- [FOUND_ANSWER: general] — the question was a greeting/general question answered without document context
-
-CONTEXT FROM DOCUMENTS:
-{{context}}
-
-USER QUESTION: {{question}}
-
-YOUR ANSWER:"""
-
-    return enhanced_prompt
-
-
 def create_history_aware_rag_chain(
     vectorstore: FAISS,
-    chat_history: Optional[List[Dict[str, Any]]] = None,
     print_debug: bool = False,
+    notebook_id: Optional[str] = None,
 ) -> Any:
     """
     Build a history-aware RAG chain that can handle follow-up questions.
@@ -1054,32 +948,44 @@ def create_history_aware_rag_chain(
 
     Args:
         vectorstore: FAISS vectorstore object
-        chat_history: Optional list of previous messages from database
         print_debug: Enable debug logging
+        notebook_id: The ID of the notebook for loading settings
 
     Returns:
         Runnable chain that accepts {"input": question} and optional {"chat_history": [...]}
     """
+    from langchain_core.output_parsers import StrOutputParser
+    from langchain_ollama import OllamaLLM
+    from langchain_core.prompts import MessagesPlaceholder
+
     if print_debug:
-        logger.info("\n🔗 Building History-Aware RAG Chain...")
+        logger.info("\n\n🛠️\tBuilding History-Aware RAG Chain...")
+
+    settings = _load_notebook_settings(notebook_id)
 
     # Step 1: Create quality-based retriever
     def quality_retriever(query: str) -> List[Document]:
+        if print_debug:
+            logger.info("   " + "━" * 60)
+            logger.info("   🔍\tFinal Search Query (After History Rephrasing): ")
+            logger.info(f"      '{query}'")
+            logger.info("   " + "━" * 60)
+
         return retrieve_quality_chunks(
             vectorstore,
             query,
-            k=RAG_RETRIEVAL_K,
-            min_results=RAG_RETRIEVAL_MIN_RESULTS,
-            score_threshold=RAG_RETRIEVAL_SCORE_THRESHOLD,
+            k=int(settings["rag_retrieval_k"]),
+            min_results=int(settings["rag_retrieval_min_results"]),
+            score_threshold=float(settings["rag_retrieval_score_threshold"]),
             print_debug=print_debug,
         )
 
     # Step 2: Initialize LLM
     llm = OllamaLLM(
-        model=LLM_MODEL_NAME,
-        base_url=LLM_BASE_URL,
-        temperature=LLM_TEMPERATURE,
-        num_ctx=LLM_NUM_CTX,
+        model=str(settings["llm_model_name"]),
+        base_url=cfg.OLLAMA_BASE_URL,
+        temperature=float(settings["llm_temp"]),
+        num_ctx=int(settings["llm_num_ctx"]),
     )
 
     # Step 3: Create history-aware retriever prompt with domain awareness
@@ -1088,81 +994,139 @@ def create_history_aware_rag_chain(
         [
             (
                 "system",
-                REPHRASE_PROMPT,
+                cfg.REPHRASE_PROMPT,
             ),
             MessagesPlaceholder("chat_history"),
             ("human", "{input}"),
         ]
     )
 
-    # Step 4: Create the history-aware retriever using LangChain
-    history_aware_retriever: Any = create_history_aware_retriever(  # type: ignore[call-arg]
-        llm, vectorstore.as_retriever(), rephrase_prompt
+    # Step 4: Standalone Question Reformulator
+    # Rephrase the question using chat history if available, else keep the original
+    from langchain_core.runnables import RunnableBranch, RunnablePassthrough
+
+    def check_has_history(x: Dict[str, Any]) -> bool:
+        """Check if dictionary has chat history."""
+        return bool(x.get("chat_history", []))
+
+    def get_query_str(q: Any) -> str:
+        if isinstance(q, dict):
+            # For the reformulator, pull the raw input/question string
+            q_dict: Dict[str, Any] = q  # pyright: ignore[reportUnknownVariableType]
+            return str(q_dict.get("input", q_dict.get("question", "")))
+        return str(q)
+
+    def extract_rephrased_question(rephraser_output: Any) -> str:
+        # StrOutputParser returns a string. But just to be sure we pull a clean string
+        # we parse it out in case it's an AIMessage.
+        if hasattr(rephraser_output, "content"):
+            return str(rephraser_output.content).strip()
+        return str(rephraser_output).strip()
+
+    # Branch automatically executes the rephrase prompt if history is present
+    question_rephraser: Any = RunnableBranch(  # pyright: ignore[reportUnknownVariableType]
+        (
+            check_has_history,
+            rephrase_prompt
+            | llm
+            | StrOutputParser()
+            | RunnableLambda(extract_rephrased_question),
+        ),
+        RunnableLambda(get_query_str),
     )
 
     # Step 5: Create enhanced prompt template with time and general knowledge permission
-    enhanced_system_prompt: str = get_enhanced_system_prompt()
-    qa_prompt: ChatPromptTemplate = ChatPromptTemplate.from_template(
-        enhanced_system_prompt
-    )  # type: ignore[misc]
+    custom_instructions = settings.get("sys_prompt_override", None)
+    sys_prompt_raw: str = cfg.get_sys_prompt(
+        custom_instructions=str(custom_instructions) if custom_instructions else None
+    )
 
-    # Step 6: Build the complete chain
-    def get_query_str(q: Any) -> str:
-        if isinstance(q, dict):
-            return str(q.get("input", q.get("question", "")))  # type: ignore
-        return str(q)
+    # Extract the system portion by cleaning out the hardcoded user question block
+    # so we can use a proper conversational Messages format
+    clean_sys_prompt = re.sub(
+        r"<user_question>.*?</user_question>\n*YOUR ANSWER:?",
+        "",
+        sys_prompt_raw,
+        flags=re.DOTALL,
+    )
 
-    # If chat history is provided, use the history-aware flow
-    if chat_history:
-        formatted_history: List[BaseMessage] = format_chat_history_for_rephrase(
-            chat_history
+    qa_prompt: Any = ChatPromptTemplate.from_messages(  # pyright: ignore[reportUnknownMemberType]
+        [
+            ("system", clean_sys_prompt),
+            MessagesPlaceholder("chat_history"),
+            ("human", "{question}"),
+        ]
+    )
+
+    def retrieve_and_format_context(x: Dict[str, Any]) -> str:
+        # CRITICAL OPTIMIZATION: If the query is detected strictly as a greeting,
+        # simply route it cleanly around the FAISS retrieval mechanics.
+        # This completely skips useless embedding retrieval but preserves LLM context formatting!
+        rephrased_q = str(x.get("rephrased_question", ""))
+
+        # Test BOTH the original query and the newly reformulated query!
+        if x.get("is_greeting", False) or is_greeting(rephrased_q):
+            return format_context_with_sources(docs=[], print_debug=print_debug)
+
+        docs = quality_retriever(rephrased_q)
+
+        if "__retrieved_docs__" in x:
+            retrieved_docs: Any = x["__retrieved_docs__"]
+            if isinstance(retrieved_docs, list):
+                retrieved_docs.extend(docs)  # type: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+
+        return format_context_with_sources(
+            docs=docs,
+            print_debug=print_debug,
         )
 
-        rag_chain: Any = (  # type: ignore[assignment]
-            {
-                "chat_history": RunnableLambda(lambda x: formatted_history),
-                "context": RunnableLambda(
-                    lambda x: format_context_with_sources(
-                        docs=history_aware_retriever.invoke(  # type: ignore[attr-defined]
-                            {
-                                "input": (
-                                    str(x.get("input", ""))  # type: ignore[union-attr]
-                                    if isinstance(x, dict)
-                                    else ""
-                                ),
-                                "chat_history": formatted_history,
-                            }
-                        ),
-                        print_debug=print_debug,
-                    )
-                ),
-                "question": RunnablePassthrough(),
-            }
-            | qa_prompt
-            | llm
-            | StrOutputParser()
+    def build_final_prompt_dict(x: Dict[str, Any]) -> Dict[str, Any]:
+        """Map variables explicitly to the final qa_prompt structure."""
+        current_question = get_query_str(x)
+        rephrased_q = str(x.get("rephrased_question", ""))
+
+        if print_debug and current_question != rephrased_q:
+            logger.info("   " + "━" * 60)
+            logger.info(f"   🧠\tContextual Question Formed: '{rephrased_q}'")
+            logger.info("   " + "━" * 60)
+
+        # Ensure we don't accidentally drop the is_greeting flag or other metadata
+        return {
+            "context": str(x.get("context", "")),
+            "question": rephrased_q,
+            "chat_history": x.get("chat_history", []),
+        }
+
+    # A single dynamic Rag Chain that uses history if provided, bypasses FAISS for greetings,
+    # and natively passes the contextualized question directly to the final QA LLM
+    rag_chain: Any = (
+        RunnablePassthrough.assign(rephrased_question=question_rephraser)
+        | RunnablePassthrough.assign(
+            context=RunnableLambda(retrieve_and_format_context)
         )
-    else:
-        rag_chain: Any = (  # type: ignore[assignment]
-            {
-                "context": RunnableLambda(
-                    lambda query: format_context_with_sources(  # type: ignore[misc]
-                        docs=quality_retriever(get_query_str(query)),
-                        print_debug=print_debug,
-                    )
-                ),
-                "question": RunnablePassthrough(),
-            }
-            | qa_prompt
-            | llm
-            | StrOutputParser()
-        )
+        | RunnableLambda(build_final_prompt_dict)
+        | qa_prompt
+        | llm
+        | StrOutputParser()
+    )
 
     if print_debug:
-        logger.info("   ✅ History-Aware RAG Chain created!")
-        logger.info("\n   Chain Flow:")
+        logger.info("🚀\tAdvanced RAG Chain created!")
         logger.info(
-            "   Question + History → Rephrase → Quality Retriever → Context Formatter → Enhanced Prompt → LLM → Answer"
+            "🌊\tChain Flow: Question + History → Rephrase → Quality Retriever → Context Formatter → Enhanced Prompt → LLM → Answer"
         )
 
     return rag_chain
+
+
+def get_installed_ollama_models() -> List[str]:
+    """Fetch tags from local Ollama API (http://localhost:11434/api/tags)."""
+    import requests
+
+    try:
+        response = requests.get(f"{cfg.OLLAMA_BASE_URL}/api/tags", timeout=2)
+        if response.status_code == 200:
+            return [m["name"] for m in response.json().get("models", [])]
+        return []
+    except Exception:
+        return []

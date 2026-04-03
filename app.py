@@ -9,61 +9,42 @@ import html
 
 import streamlit as st
 import os
-import tempfile
 import logging
-import requests
 import uuid
-import re
 from typing import List, Dict, Any, Optional, Callable
 from pathlib import Path
 
-from middlewares import db_middleware as db
-from langchain_ollama import OllamaLLM
+from middlewares import db_middleware
 from langchain_core.documents import Document
 
-from core.configs import (
-    APP_NAME,
-    DB_ROOT_PATH,
-    PRINT_DEBUG,
-    USER_ROLE_NAME,
-    ASSISTANT_ROLE_NAME,
-    LLM_BASE_URL,
-    LLM_MODEL_NAME,
-    LLM_TEMPERATURE,
-    LLM_NUM_CTX,
-)
+import core.configs as cfg
 from core.utils import (
-    format_relative_time,
+    get_default_notebook_settings,
     hash_file_content,
-    detect_file_type,
     check_file_already_exists_in_notebook,
-    chunk_and_process_file,
-    create_vectorstore_from_chunks,
-    merge_vectorstores,
-    save_source_to_database,
-    process_user_query,
     reload_vectorstore_and_chain,
-    load_persisted_vectorstore_filtered,
-    get_notebook_vectorstore_dir,
     get_source_vectorstore_dir,
-    try_load_embeddings,
-    create_history_aware_rag_chain,  # ← For history-aware retrieval
+    create_history_aware_rag_chain,
 )
 
 # ============================================================================
 # LOGGING CONFIGURATION
 # ============================================================================
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    datefmt="%H:%M:%S",
 )
 logger = logging.getLogger(__name__)
+
+# Reduce noise from external libraries
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
 
 # ============================================================================
 # CONSTANTS & PATHS
 # ============================================================================
 DATA_DIR = Path("data")
-OLLAMA_BASE_URL = LLM_BASE_URL
-
 
 DATA_DIR.mkdir(exist_ok=True)
 
@@ -71,7 +52,7 @@ DATA_DIR.mkdir(exist_ok=True)
 # PAGE CONFIGURATION
 # ============================================================================
 st.set_page_config(
-    page_title=APP_NAME,
+    page_title=cfg.APP_NAME,
     page_icon="📚",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -265,7 +246,7 @@ def load_chat_history() -> List[Dict[str, Any]]:
     """Load chat history from database."""
     notebook_id = st.session_state.get("current_notebook_id")
     if notebook_id:
-        return db.get_chat_history(notebook_id)
+        return db_middleware.get_chat_history(notebook_id)
     return []
 
 
@@ -273,7 +254,7 @@ def load_saved_notes() -> List[Dict[str, Any]]:
     """Load saved notes from database."""
     notebook_id = st.session_state.get("current_notebook_id")
     if notebook_id:
-        return db.get_notes_for_notebook(notebook_id)
+        return db_middleware.get_notes_for_notebook(notebook_id)
     return []
 
 
@@ -283,7 +264,7 @@ def load_documents_state() -> Dict[str, Any]:
     if not notebook_id:
         return {}
 
-    sources = db.get_sources_for_notebook(notebook_id)
+    sources = db_middleware.get_sources_for_notebook(notebook_id)
     docs_dict: Dict[str, Any] = {}
     for src in sources:
         # Use source ID as key to avoid collisions when sources have the same filename
@@ -302,11 +283,13 @@ def load_documents_state() -> Dict[str, Any]:
 # ============================================================================
 def load_workspace(notebook_id: str, print_debug: bool = False):
     """Load or reload all workspace state for a specific notebook."""
+    from core.utils import load_persisted_vectorstore_filtered
+
     st.session_state.current_notebook_id = notebook_id
     st.session_state.documents = load_documents_state()
 
     # Initialize selected sources to all sources by default
-    sources = db.get_sources_for_notebook(notebook_id)
+    sources = db_middleware.get_sources_for_notebook(notebook_id)
     st.session_state.selected_sources = {src["id"] for src in sources}
 
     st.session_state.vectorstore = load_persisted_vectorstore_filtered(
@@ -315,11 +298,10 @@ def load_workspace(notebook_id: str, print_debug: bool = False):
 
     if st.session_state.vectorstore is not None:
         # Use history-aware RAG chain for better context understanding
-        st.session_state.chat_history = load_chat_history()
         st.session_state.rag_chain = create_history_aware_rag_chain(
             vectorstore=st.session_state.vectorstore,
-            chat_history=st.session_state.chat_history,
             print_debug=print_debug,
+            notebook_id=st.session_state.current_notebook_id,
         )
     else:
         st.session_state.rag_chain = None
@@ -332,8 +314,10 @@ def load_workspace(notebook_id: str, print_debug: bool = False):
 
 
 def check_ollama_connection():
+    import requests
+
     try:
-        response = requests.get(f"{OLLAMA_BASE_URL}/api/tags")
+        response = requests.get(f"{cfg.OLLAMA_BASE_URL}/api/tags")
         if response.status_code == 200:
             return True
         return False
@@ -345,10 +329,14 @@ def check_ollama_connection():
 def initialize_session_state():
     """Initialize all global session state variables on first app run."""
     if "notebooks" not in st.session_state:
-        st.session_state.notebooks = db.get_all_notebooks()
+        st.session_state.notebooks = db_middleware.get_all_notebooks()
 
     if "current_notebook_id" not in st.session_state:
         st.session_state.current_notebook_id = None
+        print(
+            "♻️\tRESET NOTEBOOK ID AT LINE",
+            __import__("inspect").currentframe().f_lineno,
+        )
 
     if "ollama_ready" not in st.session_state:
         st.session_state.ollama_ready = check_ollama_connection()
@@ -366,51 +354,64 @@ def initialize_session_state():
         st.session_state.rename_source_name = None
 
 
-def generate_summary(chunks: List[Document]) -> str:
+def generate_summary(chunks: List[Document], notebook_id: str) -> str:
     """Generate a brief summary of the document using Top-K Slicing."""
+    from langchain_ollama import OllamaLLM
+
     try:
-        # Get the first 3 chunks (or fewer if the document is very short)
-        top_k_chunks = chunks[:3]
+        # Get the first k chunks (or fewer if the document is very short)
+        top_k_chunks = chunks[: cfg.TOP_K_CHUNKS_FOR_SUMMARY]
         context_text = "\n\n".join([chunk.page_content for chunk in top_k_chunks])
 
-        summary_prompt = (
-            f"Please read the following text extracted from the beginning of a document.\n"
-            f"Provide a brief 2-3 sentence summary of the main topics in this document.\n\n"
-            f"TEXT:\n{context_text}\n\n"
-            f"SUMMARY:"
-        )
+        summary_prompt = cfg.SUMMARY_PROMPT.format(text=context_text)
 
         # Initialize standalone LLM
+        settings = (
+            db_middleware.get_notebook_settings(notebook_id)
+            or get_default_notebook_settings()
+        )
         llm = OllamaLLM(
-            model=LLM_MODEL_NAME,
-            base_url=LLM_BASE_URL,
-            temperature=LLM_TEMPERATURE,
-            num_ctx=LLM_NUM_CTX,
+            model=settings["llm_model_name"],
+            base_url=cfg.OLLAMA_BASE_URL,
+            temperature=settings["llm_temp"],
+            num_ctx=settings["llm_num_ctx"],
         )
 
         summary = llm.invoke(summary_prompt)
 
-        summary = re.sub(r"\[(?:FOUND|FIND)_ANSWER:\s*(?:true|false|general)\]", "", summary, flags=re.IGNORECASE).strip()
-        return summary
+        return summary.strip()
     except Exception as e:
         logger.error(f"Summary generation failed: {str(e)}")
         return "Unable to generate summary."
 
 
-def generate_suggested_questions(rag_chain: Any) -> List[str]:
-    """Generate 3-4 suggested questions based on document content."""
-    try:
-        question_prompt = (
-            "Generate exactly 3 specific and interesting questions that a reader might ask about this document. "
-            "Format as: 1. Question? 2. Question? 3. Question?"
-        )
-        response = rag_chain.invoke(question_prompt)
+def generate_suggested_questions(chunks: List[Document], notebook_id: str) -> List[str]:
+    """Generate 3 suggested questions based on the Top-K chunks of the document."""
+    from langchain_ollama import OllamaLLM
 
-        if isinstance(response, str):
-            response = re.sub(r"\[(?:FOUND|FIND)_ANSWER:\s*(?:true|false|general)\]", "", response, flags=re.IGNORECASE).strip()
+    try:
+        # Get the first k chunks (or fewer if the document is very short)
+        top_k_chunks = chunks[: cfg.TOP_K_CHUNKS_FOR_QUESTIONS]
+        context_text = "\n\n".join([chunk.page_content for chunk in top_k_chunks])
+
+        question_prompt = cfg.SUGGESTED_QUESTIONS_PROMPT.format(text=context_text)
+
+        # Initialize standalone LLM
+        settings = (
+            db_middleware.get_notebook_settings(notebook_id)
+            or get_default_notebook_settings()
+        )
+        llm = OllamaLLM(
+            model=settings["llm_model_name"],
+            base_url=cfg.OLLAMA_BASE_URL,
+            temperature=settings["llm_temp"],
+            num_ctx=settings["llm_num_ctx"],
+        )
+
+        response = llm.invoke(question_prompt)
 
         questions: List[str] = []
-        for line in response.split("\n"):
+        for line in str(response).split("\n"):
             if line.strip() and (line[0].isdigit() or line.startswith("-")):
                 question = line.lstrip("0123456789.-) ").strip()
                 if question and len(question) > 5 and "?" in question:
@@ -429,6 +430,16 @@ def process_file(
     progress_callback: Optional[Callable[[str], None]] = None,
 ) -> bool:
     """Process a PDF: extract, chunk, embed, merge with existing data."""
+    import tempfile
+    from core.utils import (
+        detect_file_type,
+        chunk_and_process_file,
+        try_load_embeddings,
+        create_vectorstore_from_chunks,
+        merge_vectorstores,
+        save_source_to_database,
+    )
+
     tmp_path = None
     file_bytes = None
     try:
@@ -476,6 +487,12 @@ def process_file(
                     yield
 
         with optional_spinner():
+            notebook_id = st.session_state.current_notebook_id
+            settings = (
+                db_middleware.get_notebook_settings(notebook_id)
+                or get_default_notebook_settings()
+            )
+
             # Load and chunk
             chunks, num_chunks = chunk_and_process_file(
                 tmp_path,
@@ -483,15 +500,19 @@ def process_file(
                 filename,
                 print_debug,
                 progress_callback=progress_callback,
+                chunk_size=int(settings["rag_max_chunk_len"]),
+                chunk_overlap=int(settings["rag_chunk_overlap"]),
             )
 
             # Embed with GPU/CPU fallback
-            logger.info(f"Creating embeddings for {num_chunks} chunks")
+            logger.info(f"🛠️\tCreating embeddings for {num_chunks} chunks")
             if progress_callback:
                 progress_callback("Loading embedding model...")
             embeddings = try_load_embeddings()
             if embeddings is None:
-                st.error("Failed to load embedding model. Please check your system.")
+                st.error(
+                    "❌\tFailed to load embedding model. Please check your system."
+                )
                 return False
 
             if progress_callback:
@@ -500,30 +521,7 @@ def process_file(
                 chunks, embeddings, print_debug
             )
 
-            # Merge or create, then recreate RAG chain for summary/question generation
-            st.session_state.vectorstore = merge_vectorstores(
-                st.session_state.vectorstore, new_vectorstore, print_debug
-            )
-            # Use history-aware RAG chain (with or without history)
-            st.session_state.rag_chain = create_history_aware_rag_chain(
-                vectorstore=st.session_state.vectorstore,
-                chat_history=st.session_state.get(
-                    "chat_history"
-                ),  # May be None on first upload
-                print_debug=print_debug,
-            )
-
-            # Generate summary
-            logger.info(f"Generating summary for {filename}")
-            summary = generate_summary(chunks)
-
-            # Generate suggested questions
-            logger.info(f"Generating suggested questions for {filename}")
-            suggested_questions = generate_suggested_questions(
-                st.session_state.rag_chain
-            )
-
-            # Save to Database
+            # Setup Database / File Paths mapping
             notebook_id = st.session_state.current_notebook_id
 
             # Generate source_id upfront so we know the vectorstore path
@@ -533,6 +531,31 @@ def process_file(
             src_vs_dir = get_source_vectorstore_dir(notebook_id, source_id)
             # Store the relative path for persistence
             vectorstore_path = str(src_vs_dir)
+
+            # CRITICAL FIX: Save the individual source vectorstore BEFORE merging it!
+            # Langchain's FAISS `merge_from` empties the target index natively.
+            new_vectorstore.save_local(vectorstore_path)
+
+            # Merge or create, then recreate RAG chain for summary/question generation
+            st.session_state.vectorstore = merge_vectorstores(
+                st.session_state.vectorstore, new_vectorstore, print_debug
+            )
+            # Use history-aware RAG chain (with or without history)
+            st.session_state.rag_chain = create_history_aware_rag_chain(
+                vectorstore=st.session_state.vectorstore,
+                print_debug=print_debug,
+                notebook_id=notebook_id,
+            )
+
+            # Generate summary
+            logger.info(f"🚀\tGenerating summary for {filename}")
+            summary = generate_summary(chunks, notebook_id=notebook_id)
+
+            # Generate suggested questions
+            logger.info(f"🚀\tGenerating suggested questions for {filename}")
+            suggested_questions = generate_suggested_questions(
+                chunks, notebook_id=notebook_id
+            )
 
             # Add source to database with correct vectorstore path
             source_id = save_source_to_database(
@@ -556,9 +579,6 @@ def process_file(
                 "suggested_questions": suggested_questions,
             }
 
-            # Save the individual source vectorstore to the path we calculated above
-            new_vectorstore.save_local(vectorstore_path)
-
             # Add the new source to selected sources (auto-select)
             st.session_state.selected_sources.add(source_id)
 
@@ -576,14 +596,14 @@ def process_file(
                 notebook_id, st.session_state.selected_sources, print_debug
             )
 
-            logger.info(f"Successfully processed {filename}")
+            logger.info(f'✨\tSuccessfully processed "{filename}"')
 
-        st.success(f"Successfully loaded '{filename}'")
+        st.success(f'✨ Successfully loaded "{filename}"')
 
         return True
 
     except Exception as e:
-        logger.error(f"Error processing {filename}: {str(e)}")
+        logger.error(f'Error processing "{filename}": {str(e)}')
         st.error(f"Error processing file: {str(e)}")
         return False
 
@@ -601,6 +621,7 @@ def process_file(
 # ============================================================================
 def go_back_to_notebooks():
     st.session_state.current_notebook_id = None
+    print("♻️\tRESET NOTEBOOK ID AT LINE", __import__("inspect").currentframe().f_lineno)
 
 
 def source_hub_ui(print_debug: bool = False):
@@ -611,14 +632,19 @@ def source_hub_ui(print_debug: bool = False):
     # Header with back arrow and title (vertically centered)
     col1, col2 = st.columns([0.5, 3], vertical_alignment="center")
     with col1:
-        if st.button("←", use_container_width=True, help="Back to Notebooks"):
+        if st.button(
+            "←",
+            use_container_width=True,
+            help="Back to Notebooks",
+            key="back_to_notebooks_btn",
+        ):
             go_back_to_notebooks()
             st.rerun()
     with col2:
         st.markdown("## Source Hub")
 
     # Show notebook description if available
-    notebook = db.get_notebook(st.session_state.current_notebook_id)
+    notebook = db_middleware.get_notebook(st.session_state.current_notebook_id)
     if notebook and notebook.get("description"):
         st.caption(notebook["description"])
 
@@ -638,8 +664,8 @@ def source_hub_ui(print_debug: bool = False):
         st.session_state.pending_new_uploads = {}
 
     # Typed alias — mutations propagate back to session_state via dict reference
-    pending_repls: Dict[str, bytes] = st.session_state.pending_replacements # type: ignore
-    pending_new: Dict[str, bytes] = st.session_state.pending_new_uploads # type: ignore
+    pending_repls: Dict[str, bytes] = st.session_state.pending_replacements  # type: ignore
+    pending_new: Dict[str, bytes] = st.session_state.pending_new_uploads  # type: ignore
 
     if uploaded_files:
         new_pending_replacements = False
@@ -751,7 +777,7 @@ def source_hub_ui(print_debug: bool = False):
                 process_file(
                     fbytes,
                     fname,
-                    PRINT_DEBUG,
+                    cfg.PRINT_DEBUG,
                     progress_callback=update_granular_status,
                 )
 
@@ -827,7 +853,7 @@ def source_hub_ui(print_debug: bool = False):
                 process_file(
                     file_bytes_new,
                     filename,
-                    PRINT_DEBUG,
+                    cfg.PRINT_DEBUG,
                     progress_callback=update_granular_status,
                 )
 
@@ -899,18 +925,18 @@ def source_hub_ui(print_debug: bool = False):
 
                 # Phase 1: Remove old version
                 if source_id in st.session_state.documents:
-                    db.delete_source(source_id)
-                    source_dir = get_source_vectorstore_dir(
-                        st.session_state.current_notebook_id, source_id
-                    )
-                    if source_dir.exists():
-                        import shutil
+                    if db_middleware.delete_source(source_id):
+                        source_dir = get_source_vectorstore_dir(
+                            st.session_state.current_notebook_id, source_id
+                        )
+                        if source_dir.exists():
+                            import shutil
 
-                        shutil.rmtree(source_dir, ignore_errors=True)
+                            shutil.rmtree(source_dir, ignore_errors=True)
 
-                    # Remove from selected sources if it was selected
-                    st.session_state.selected_sources.discard(source_id)
-                    del st.session_state.documents[source_id]
+                        # Remove from selected sources if it was selected
+                        st.session_state.selected_sources.discard(source_id)
+                        del st.session_state.documents[source_id]
 
                 # Reload updated vectorstore with filtered selection
                 reload_vectorstore_and_chain(
@@ -1203,7 +1229,7 @@ def chat_interface(notebook_name: str, print_debug: bool = False):
 
         # Display chat history (proper left/right layout)
         for _, message in enumerate(st.session_state.chat_history):
-            if message["role"] == USER_ROLE_NAME:
+            if message["role"] == cfg.USER_ROLE_NAME:
                 render_user_message(message["content"])
             else:
                 # Assistant message
@@ -1222,24 +1248,6 @@ def chat_interface(notebook_name: str, print_debug: bool = False):
                                 unsafe_allow_html=True,
                             )
 
-        # Auto-scroll marker: scroll to this element when new messages arrive
-        st.markdown('<div id="chat-scroll-anchor"></div>', unsafe_allow_html=True)
-
-        # Inject JavaScript to auto-scroll to bottom when new messages are added
-        st.markdown(
-            """
-            <script>
-            // Auto-scroll to bottom of chat container
-            const chatAnchors = document.querySelectorAll('div#chat-scroll-anchor');
-            if (chatAnchors.length > 0) {
-                const lastAnchor = chatAnchors[chatAnchors.length - 1];
-                lastAnchor.parentElement.parentElement.parentElement.scrollTop = lastAnchor.parentElement.parentElement.parentElement.scrollHeight;
-            }
-            </script>
-            """,
-            unsafe_allow_html=True,
-        )
-
     # DETECT INTERRUPTED GENERATIONS: If the last message in history is from a User without an Assistant response
     needs_answer = False
     query_to_answer = ""
@@ -1248,39 +1256,50 @@ def chat_interface(notebook_name: str, print_debug: bool = False):
         query_to_answer = user_query
         needs_answer = True
         # Save user message immediately
-        db.add_chat_message(
+        db_middleware.add_chat_message(
             notebook_id=st.session_state.current_notebook_id,
-            role=USER_ROLE_NAME,
+            role=cfg.USER_ROLE_NAME,
             content=user_query,
         )
         st.session_state.chat_history.append(
-            {"role": USER_ROLE_NAME, "content": user_query, "sources": None}
+            {"role": cfg.USER_ROLE_NAME, "content": user_query, "sources": None}
         )
         # Display user message immediately
         with chat_container:
             render_user_message(user_query)
     elif (
         len(st.session_state.chat_history) > 0
-        and st.session_state.chat_history[-1]["role"] == USER_ROLE_NAME
+        and st.session_state.chat_history[-1]["role"] == cfg.USER_ROLE_NAME
     ):
         needs_answer = True
         query_to_answer = st.session_state.chat_history[-1]["content"]
         # It's already rendered via the loop above!
 
     if needs_answer:
+        # Re-initialize the RAG chain if it was cleared (e.g. by applying new settings)
+        if (
+            st.session_state.rag_chain is None
+            and st.session_state.vectorstore is not None
+        ):
+            st.session_state.rag_chain = create_history_aware_rag_chain(
+                vectorstore=st.session_state.vectorstore,
+                print_debug=print_debug,
+                notebook_id=st.session_state.current_notebook_id,
+            )
+
         # Generate answer
         if st.session_state.rag_chain is None:
             error_msg = "⚠️ Generation interrupted or RAG Chain not initialized. Please ensure documents are selected and ask your question again."
-            db.add_chat_message(
+            db_middleware.add_chat_message(
                 notebook_id=st.session_state.current_notebook_id,
-                role=ASSISTANT_ROLE_NAME,
+                role=cfg.ASSISTANT_ROLE_NAME,
                 content=error_msg,
                 sources=None,
                 found_answer=False,
             )
             st.session_state.chat_history.append(
                 {
-                    "role": ASSISTANT_ROLE_NAME,
+                    "role": cfg.ASSISTANT_ROLE_NAME,
                     "content": error_msg,
                     "sources": None,
                     "found_answer": False,
@@ -1288,11 +1307,35 @@ def chat_interface(notebook_name: str, print_debug: bool = False):
             )
             st.rerun()
         else:
+            from core.utils import process_user_query
+
             with chat_container:
                 with st.spinner("🤔 Thinking..."):
                     try:
                         # Get answer and sources via RAG chain with chat history context
-                        logger.info(f"Processing query: {query_to_answer[:50]}...")
+                        logger.info(f"🔡\tProcessing query: {query_to_answer}")
+
+                        if print_debug:
+                            # Log selected sources
+                            logger.info("   " + "━" * 60)
+                            logger.info("   📚\tSelected Sources for this Query:")
+                            all_sources = db_middleware.get_sources_for_notebook(
+                                st.session_state.current_notebook_id
+                            )
+                            selected_names = [
+                                src.get("file_name", "Unknown")
+                                for src in all_sources
+                                if src["id"] in st.session_state.selected_sources
+                            ]
+                            if selected_names:
+                                for name in selected_names:
+                                    logger.info(f"      • {name}")
+                            else:
+                                logger.info(
+                                    "      (No sources selected / General Knowledge)"
+                                )
+                            logger.info("   " + "━" * 60)
+
                         # Exclude the current query from the chat history passed for context!
                         history_context = st.session_state.chat_history[:-1]
 
@@ -1308,16 +1351,16 @@ def chat_interface(notebook_name: str, print_debug: bool = False):
                         st.markdown(answer)
 
                         # Add to history with found_answer flag
-                        db.add_chat_message(
+                        db_middleware.add_chat_message(
                             notebook_id=st.session_state.current_notebook_id,
-                            role=ASSISTANT_ROLE_NAME,
+                            role=cfg.ASSISTANT_ROLE_NAME,
                             content=answer,
                             sources=sources,
                             found_answer=found_answer,
                         )
                         st.session_state.chat_history.append(
                             {
-                                "role": ASSISTANT_ROLE_NAME,
+                                "role": cfg.ASSISTANT_ROLE_NAME,
                                 "content": answer,
                                 "sources": sources,
                                 "found_answer": found_answer,
@@ -1359,16 +1402,16 @@ def chat_interface(notebook_name: str, print_debug: bool = False):
                         else:
                             display_error = f"❌ Error: {error_msg}"
 
-                        db.add_chat_message(
+                        db_middleware.add_chat_message(
                             notebook_id=st.session_state.current_notebook_id,
-                            role=ASSISTANT_ROLE_NAME,
+                            role=cfg.ASSISTANT_ROLE_NAME,
                             content=display_error,
                             sources=None,
                             found_answer=False,
                         )
                         st.session_state.chat_history.append(
                             {
-                                "role": ASSISTANT_ROLE_NAME,
+                                "role": cfg.ASSISTANT_ROLE_NAME,
                                 "content": display_error,
                                 "sources": None,
                                 "found_answer": False,
@@ -1396,8 +1439,8 @@ def create_note_modal():
         st.rerun()
     if save_click:
         try:
-            db.add_note(st.session_state.current_notebook_id, title, content)
-            st.session_state.saved_notes = db.get_notes_for_notebook(
+            db_middleware.add_note(st.session_state.current_notebook_id, title, content)
+            st.session_state.saved_notes = db_middleware.get_notes_for_notebook(
                 st.session_state.current_notebook_id
             )
             st.rerun()
@@ -1423,8 +1466,8 @@ def edit_note_modal(note_id: str, current_title: str, current_content: str):
         st.rerun()
     if save_click:
         try:
-            db.update_note(note_id, title=title, content=content)
-            st.session_state.saved_notes = db.get_notes_for_notebook(
+            db_middleware.update_note(note_id, title=title, content=content)
+            st.session_state.saved_notes = db_middleware.get_notes_for_notebook(
                 st.session_state.current_notebook_id
             )
             st.rerun()
@@ -1434,6 +1477,8 @@ def edit_note_modal(note_id: str, current_title: str, current_content: str):
 
 def notes_panel_ui():
     """Dedicated Notes panel — lists all notes, supports add/edit/delete."""
+    from core.utils import format_relative_time
+
     st.markdown(
         '<div class="notes-panel-bg" style="display:none"></div>',
         unsafe_allow_html=True,
@@ -1484,13 +1529,15 @@ def notes_panel_ui():
 
 
 def delete_notebook_callback(nb_id: str):
-    db.delete_notebook(nb_id)
-    # Clean up vectorstore if exists
-    vs_dir = get_notebook_vectorstore_dir(nb_id)
-    if vs_dir.exists():
-        import shutil
+    from core.utils import get_notebook_vectorstore_dir
 
-        shutil.rmtree(vs_dir, ignore_errors=True)
+    if db_middleware.delete_notebook(nb_id):
+        # Clean up vectorstore if exists
+        vs_dir = get_notebook_vectorstore_dir(nb_id)
+        if vs_dir.exists():
+            import shutil
+
+            shutil.rmtree(vs_dir, ignore_errors=True)
 
 
 @st.dialog("Create New Notebook")
@@ -1506,11 +1553,233 @@ def create_notebook_modal():
             st.error("Notebook name cannot be empty.")
         else:
             try:
-                new_id = db.create_notebook(new_name, new_desc)
+                new_id = db_middleware.create_notebook(new_name, new_desc)
                 st.session_state.loading_notebook_id = new_id
                 st.rerun()
             except ValueError as e:
                 st.error(f"❌ {str(e)}")
+
+
+def render_notebook_settings_sidebar(notebook_id: str):
+    from core.utils import get_installed_ollama_models
+
+    settings = (
+        db_middleware.get_notebook_settings(notebook_id)
+        or get_default_notebook_settings()
+    )
+    models: List[str] = get_installed_ollama_models()
+    defaults = get_default_notebook_settings()
+
+    # Defaults in case the models list is empty or the selected model is not in the list
+    if settings["llm_model_name"] not in models:
+        if settings["llm_model_name"]:
+            models.append(settings["llm_model_name"])
+        else:
+            models.append(cfg.LLM_MODEL_NAME)
+
+    if not models:
+        models = [cfg.LLM_MODEL_NAME]
+
+    # Force form inputs to reset to DB values when the user "leaves out" without applying.
+    # It detects if a submit action is occurring. If not, it increments the form key.
+    revision_key = f"settings_rev_{notebook_id}"
+    if revision_key not in st.session_state:
+        st.session_state[revision_key] = 0
+
+    is_submitting = False
+    for k in st.session_state.keys():
+        if (
+            k.startswith(f"FormSubmitter:notebook_settings_form_{notebook_id}")  # type: ignore
+            and st.session_state[k] is True
+        ):
+            is_submitting = True
+            break
+
+    if not is_submitting:
+        st.session_state[revision_key] += 1
+
+    form_key = f"notebook_settings_form_{notebook_id}_{st.session_state[revision_key]}"
+
+    st.sidebar.markdown("## ⚙️ Notebook Settings")
+    st.sidebar.markdown(
+        "Configure parameters for this notebook. Changes are saved only when you click Apply Settings."
+    )
+
+    with st.sidebar.form(key=form_key):
+        st.markdown("### LLM Configuration")
+        new_model = st.selectbox(
+            "Model Name",
+            options=models,
+            index=(
+                models.index(settings["llm_model_name"])
+                if settings["llm_model_name"] in models
+                else 0
+            ),
+            placeholder=cfg.LLM_MODEL_NAME,
+            help=cfg.LLM_MODEL_NAME_HELP_MSG,
+        )
+
+        new_temp = st.slider(
+            "Temperature",
+            min_value=cfg.LLM_TEMPERATURE_MIN,
+            max_value=cfg.LLM_TEMPERATURE_MAX,
+            step=cfg.LLM_TEMPERATURE_STEP,
+            value=float(settings["llm_temp"]),
+            help=cfg.LLM_TEMPERATURE_HELP_MSG,
+        )
+
+        new_num_ctx = st.number_input(
+            "Context Window (num_ctx)",
+            min_value=cfg.LLM_NUM_CTX_MIN,
+            max_value=cfg.LLM_NUM_CTX_MAX,
+            step=cfg.LLM_NUM_CTX_STEP,
+            value=int(settings["llm_num_ctx"]),
+            placeholder=str(cfg.LLM_NUM_CTX),
+            help=cfg.LLM_NUM_CTX_HELP_MSG,
+        )
+
+        st.markdown("### System Prompt (Optional)")
+        new_sys_prompt = st.text_area(
+            "System Prompt Override",
+            value=settings.get("sys_prompt_override", "") or "",
+            height=150,
+            placeholder=cfg.SYS_PROMPT_PLACEHOLDER,
+            help=cfg.SYS_PROMPT_HELP_MSG,
+        )
+
+        st.markdown("### RAG & Retrieval")
+        new_k = st.number_input(
+            "Retrieval K",
+            min_value=cfg.RAG_RETRIEVAL_K_MIN,
+            max_value=cfg.RAG_RETRIEVAL_K_MAX,
+            step=cfg.RAG_RETRIEVAL_K_STEP,
+            value=int(settings["rag_retrieval_k"]),
+            placeholder=str(cfg.RAG_RETRIEVAL_K),
+            help=cfg.RAG_RETRIEVAL_K_HELP_MSG,
+        )
+
+        new_threshold = st.slider(
+            "Score Threshold",
+            min_value=cfg.RAG_RETRIEVAL_SCORE_THRESHOLD_MIN,
+            max_value=cfg.RAG_RETRIEVAL_SCORE_THRESHOLD_MAX,
+            step=cfg.RAG_RETRIEVAL_SCORE_THRESHOLD_STEP,
+            value=float(settings["rag_retrieval_score_threshold"]),
+            help=cfg.RAG_RETRIEVAL_SCORE_THRESHOLD_HELP_MSG,
+        )
+
+        new_history = st.number_input(
+            "Max Chat History",
+            min_value=cfg.MAX_MSG_HISTORY_MIN,
+            max_value=cfg.MAX_MSG_HISTORY_MAX,
+            step=cfg.MAX_MSG_HISTORY_STEP,
+            value=int(settings["max_msg_history"]),
+            placeholder=str(cfg.MAX_MSG_HISTORY),
+            help=cfg.MAX_MSG_HISTORY_HELP_MSG,
+        )
+
+        st.markdown("### Advanced Document Settings")
+        new_chunk_len = st.number_input(
+            "Max Chunk Length",
+            min_value=cfg.RAG_MAX_CHUNK_LEN_MIN,
+            max_value=cfg.RAG_MAX_CHUNK_LEN_MAX,
+            step=cfg.RAG_MAX_CHUNK_LEN_STEP,
+            value=int(settings["rag_max_chunk_len"]),
+            placeholder=str(cfg.RAG_MAX_CHUNK_LEN),
+            help=cfg.RAG_MAX_CHUNK_LEN_HELP_MSG,
+        )
+        new_chunk_ovl = st.number_input(
+            "Chunk Overlap",
+            min_value=cfg.RAG_CHUNK_OVERLAP_MIN,
+            max_value=cfg.RAG_CHUNK_OVERLAP_MAX,
+            step=cfg.RAG_CHUNK_OVERLAP_STEP,
+            value=int(settings["rag_chunk_overlap"]),
+            placeholder=str(cfg.RAG_CHUNK_OVERLAP),
+            help=cfg.RAG_CHUNK_OVERLAP_HELP_MSG,
+        )
+        new_min_res = st.number_input(
+            "Min Match Results (Fallback)",
+            min_value=cfg.RAG_RETRIEVAL_MIN_RESULTS_MIN,
+            max_value=cfg.RAG_RETRIEVAL_MIN_RESULTS_MAX,
+            step=cfg.RAG_RETRIEVAL_MIN_RESULTS_STEP,
+            value=int(settings["rag_retrieval_min_results"]),
+            placeholder=str(cfg.RAG_RETRIEVAL_MIN_RESULTS),
+            help=cfg.RAG_RETRIEVAL_MIN_RESULTS_HELP_MSG,
+        )
+        new_max_ctx = st.number_input(
+            "RAG Max Context Length",
+            min_value=cfg.RAG_MAX_CTX_LEN_MIN,
+            max_value=cfg.RAG_MAX_CTX_LEN_MAX,
+            step=cfg.RAG_MAX_CTX_LEN_STEP,
+            value=int(settings["rag_max_ctx_len"]),
+            placeholder=str(cfg.RAG_MAX_CTX_LEN),
+            help=cfg.RAG_MAX_CTX_LEN_HELP_MSG,
+        )
+
+        estimated_usage = (int(new_k) * 1000) + (int(new_history) * 200) + 500
+        if estimated_usage > int(new_num_ctx):
+            st.warning(
+                f"⚠️ Memory Bottleneck: Estimated usage ({estimated_usage}) exceeds Context Window ({int(new_num_ctx)}). Consider increasing Context Window or lowering Retrieval K and Chat History."
+            )
+
+        col_reset, col_apply = st.columns(2)
+        with col_reset:
+            reset_clicked = st.form_submit_button(
+                "Reset to Default", use_container_width=True
+            )
+        with col_apply:
+            apply_clicked = st.form_submit_button(
+                "Apply Settings", type="primary", use_container_width=True
+            )
+
+    if reset_clicked:
+        with st.spinner("Resetting to defaults..."):
+            is_deleted = db_middleware.delete_notebook_settings(notebook_id)
+        if is_deleted:
+            st.session_state.rag_chain = None
+            st.toast("Settings reset to defaults")
+            st.rerun()
+
+    if apply_clicked:
+        updated_settings: Dict[str, Any] = {
+            "llm_model_name": str(new_model),
+            "llm_temp": float(new_temp),
+            "llm_num_ctx": int(new_num_ctx),
+            "rag_retrieval_k": int(new_k),
+            "rag_retrieval_score_threshold": float(new_threshold),
+            "max_msg_history": int(new_history),
+            "rag_max_chunk_len": int(new_chunk_len),
+            "rag_chunk_overlap": int(new_chunk_ovl),
+            "rag_retrieval_min_results": int(new_min_res),
+            "rag_max_ctx_len": int(new_max_ctx),
+            "sys_prompt_override": (
+                str(new_sys_prompt).strip() if new_sys_prompt else ""
+            ),
+        }
+
+        settings_from_db = db_middleware.get_notebook_settings(notebook_id)
+
+        # Check if settings actually changed compared to DB (if it exists)
+        is_changed = True
+        if settings_from_db:
+            is_changed = False
+            for k, v in updated_settings.items():
+                if k not in settings_from_db or settings_from_db[k] != v:
+                    is_changed = True
+                    break
+        else:
+            # If no DB entry exists, compare with defaults to see if they just hit save without changes
+            is_changed = False
+            for k, v in updated_settings.items():
+                if k not in defaults or defaults[k] != v:
+                    is_changed = True
+                    break
+
+        if is_changed:
+            with st.spinner("Applying settings..."):
+                db_middleware.upsert_notebook_settings(notebook_id, updated_settings)
+            st.session_state.rag_chain = None
+            st.toast("Settings saved successfully")
+            st.rerun()
 
 
 @st.dialog("Rename Notebook")
@@ -1543,7 +1812,7 @@ def rename_notebook_modal(
     if save_click:
         try:
             # Pass through middleware for validation
-            db.rename_notebook(
+            db_middleware.rename_notebook(
                 notebook_id,
                 new_name if new_name != current_name else None,
                 (
@@ -1552,8 +1821,10 @@ def rename_notebook_modal(
                     else None
                 ),
             )
-            st.success("✅ Notebook renamed successfully!")
-            st.session_state.notebooks = db.get_all_notebooks()  # Reload notebook list
+            st.success("Notebook renamed successfully!")
+            st.session_state.notebooks = (
+                db_middleware.get_all_notebooks()
+            )  # Reload notebook list
             st.rerun()
         except ValueError as e:
             st.error(f"❌ {str(e)}")
@@ -1587,8 +1858,8 @@ def rename_source_modal(source_id: str, current_name: str):
                 st.warning("No changes made.")
             else:
                 # Pass through middleware for validation
-                db.rename_source(source_id, new_name)
-                st.success("✅ Source renamed successfully!")
+                db_middleware.rename_source(source_id, new_name)
+                st.success("Source renamed successfully!")
 
                 # Update session state documents to reflect change (keyed by source_id)
                 if source_id in st.session_state.documents:
@@ -1660,19 +1931,19 @@ def confirm_delete_source_dialog(
             use_container_width=True,
         ):
             with st.spinner(f"Removing {file_name}..."):
-                logger.info(f"Removing document: {file_name}")
-                db.delete_source(source_id)
-                source_dir = get_source_vectorstore_dir(notebook_id, source_id)
-                if source_dir.exists():
-                    import shutil
+                logger.info(f"🗑️\tRemoving document: {file_name}")
+                if db_middleware.delete_source(source_id):
+                    source_dir = get_source_vectorstore_dir(notebook_id, source_id)
+                    if source_dir.exists():
+                        import shutil
 
-                    shutil.rmtree(source_dir, ignore_errors=True)
-                st.session_state.selected_sources.discard(source_id)
-                if source_id in st.session_state.documents:
-                    del st.session_state.documents[source_id]
-                reload_vectorstore_and_chain(
-                    notebook_id, st.session_state.selected_sources, print_debug
-                )
+                        shutil.rmtree(source_dir, ignore_errors=True)
+                    st.session_state.selected_sources.discard(source_id)
+                    if source_id in st.session_state.documents:
+                        del st.session_state.documents[source_id]
+                    reload_vectorstore_and_chain(
+                        notebook_id, st.session_state.selected_sources, print_debug
+                    )
             st.rerun()
 
 
@@ -1694,8 +1965,8 @@ def confirm_delete_chat_history_dialog(notebook_id: str):
             use_container_width=True,
         ):
             with st.spinner("Clearing chat history..."):
-                db.delete_chat_history(notebook_id)
-                st.session_state.chat_history = []
+                if db_middleware.delete_chat_history(notebook_id):
+                    st.session_state.chat_history = []
             st.rerun()
 
 
@@ -1718,8 +1989,10 @@ def confirm_delete_note_dialog(note_id: str, notebook_id: str):
             type="primary",
             use_container_width=True,
         ):
-            db.delete_note(note_id)
-            st.session_state.saved_notes = db.get_notes_for_notebook(notebook_id)
+            if db_middleware.delete_note(note_id):
+                st.session_state.saved_notes = db_middleware.get_notes_for_notebook(
+                    notebook_id
+                )
             st.rerun()
 
 
@@ -1730,7 +2003,9 @@ def render_dashboard():
     """Renders the grid of notebooks to select or create."""
     header_col1, header_col2 = st.columns([4, 1], vertical_alignment="bottom")
     with header_col1:
-        st.markdown(f"<h1 class='main-header'>{APP_NAME}</h1>", unsafe_allow_html=True)
+        st.markdown(
+            f"<h1 class='main-header'>{cfg.APP_NAME}</h1>", unsafe_allow_html=True
+        )
         st.caption("Your personalized NotebookLM-inspired AI assistant")
     with header_col2:
         if st.button("+ Create New Notebook", type="primary", use_container_width=True):
@@ -1739,11 +2014,11 @@ def render_dashboard():
     st.subheader("Your Notebooks")
 
     # Reload notebooks to ensure we have the latest
-    notebooks = db.get_all_notebooks()
+    notebooks = db_middleware.get_all_notebooks()
 
     if not notebooks:
         st.info(
-            f"🚀 Welcome to {APP_NAME}! Create your first notebook below to get started."
+            f"🚀 Welcome to {cfg.APP_NAME}! Create your first notebook below to get started."
         )
     else:
         # Display as a grid using columns
@@ -1755,7 +2030,7 @@ def render_dashboard():
                     st.markdown(f"### {nb['name']}")
                     # Always render caption to keep all cards the same height
                     st.caption(nb["description"] or "No description")
-                    source_count = len(db.get_sources_for_notebook(nb["id"]))
+                    source_count = len(db_middleware.get_sources_for_notebook(nb["id"]))
                     st.markdown(
                         f"<small>{nb['created_at'][:10]}  ·  {source_count} source{'s' if source_count != 1 else ''}</small>",
                         unsafe_allow_html=True,
@@ -1805,7 +2080,7 @@ def main():
             unsafe_allow_html=True,
         )
         with st.spinner("Loading notebook workspace..."):
-            load_workspace(st.session_state.loading_notebook_id, PRINT_DEBUG)
+            load_workspace(st.session_state.loading_notebook_id, cfg.PRINT_DEBUG)
             st.session_state.loading_notebook_id = None
             st.rerun()
 
@@ -1826,24 +2101,11 @@ def main():
         )
         render_dashboard()
     else:
-        # Hide the sidebar in the workspace as well to use a custom 2-column layout
-        st.markdown(
-            """
-            <style>
-                [data-testid="collapsedControl"] {
-                    display: none;
-                }
-                [data-testid="stSidebar"] {
-                    display: none;
-                }
-            </style>
-            """,
-            unsafe_allow_html=True,
-        )
-
         # Get notebook details
-        notebook = db.get_notebook(st.session_state.current_notebook_id)
+        notebook = db_middleware.get_notebook(st.session_state.current_notebook_id)
         notebook_name = notebook["name"] if notebook else "Unknown Notebook"
+
+        render_notebook_settings_sidebar(st.session_state.current_notebook_id)
 
         # Display rename source modal if needed
         if (
@@ -1856,10 +2118,10 @@ def main():
         col1, col2, col3 = st.columns([1.2, 2.8, 1.2])
 
         with col1:
-            source_hub_ui(PRINT_DEBUG)
+            source_hub_ui(cfg.PRINT_DEBUG)
 
         with col2:
-            chat_interface(notebook_name, PRINT_DEBUG)
+            chat_interface(notebook_name, cfg.PRINT_DEBUG)
 
         with col3:
             notes_panel_ui()
@@ -1867,14 +2129,14 @@ def main():
 
 if __name__ == "__main__":
     # Check if the database exists to create or not
-    if not os.path.exists(DB_ROOT_PATH):
+    if not os.path.exists(cfg.DB_ROOT_PATH):
         from db.setup import init_db
 
-        if PRINT_DEBUG:
+        if cfg.PRINT_DEBUG:
             print(
-                f"⚠️ Database file not found at {DB_ROOT_PATH}. Initializing new database."
+                f"⚠️ Database file not found at {cfg.DB_ROOT_PATH}. Initializing new database."
             )
 
-        init_db(DB_ROOT_PATH, PRINT_DEBUG)
+        init_db(cfg.DB_ROOT_PATH, cfg.PRINT_DEBUG)
 
     main()

@@ -2,14 +2,7 @@ import logging
 from typing import Optional, List, Dict, Any
 from db import crud
 from core.utils import clean_spaces
-from core.configs import (
-    USER_ROLE_NAME,
-    ASSISTANT_ROLE_NAME,
-    MAX_NOTE_TITLE_LEN,
-    MAX_FILENAME_LEN,
-    MAX_DESCRIPTION_LEN,
-    MAX_NOTEBOOK_NAME_LEN,
-)
+import core.configs as cfg
 
 logger = logging.getLogger(__name__)
 
@@ -41,10 +34,10 @@ def validate_and_clean_text(
 def create_notebook(name: Optional[str], description: Optional[str]) -> str:
     """Validates notebook name and description before creating."""
     cleaned_name = validate_and_clean_text(
-        name, MAX_NOTEBOOK_NAME_LEN, required=True, field_name="Notebook Name"
+        name, cfg.MAX_NOTEBOOK_NAME_LEN, required=True, field_name="Notebook Name"
     )
     cleaned_desc = validate_and_clean_text(
-        description, MAX_DESCRIPTION_LEN, required=False, field_name="Description"
+        description, cfg.MAX_DESCRIPTION_LEN, required=False, field_name="Description"
     )
     return crud.create_notebook(cleaned_name, cleaned_desc)
 
@@ -58,7 +51,7 @@ def get_notebook(notebook_id: str) -> Optional[Dict[str, Any]]:
     return crud.get_notebook(notebook_id)
 
 
-def delete_notebook(notebook_id: str) -> None:
+def delete_notebook(notebook_id: str) -> bool:
     return crud.delete_notebook(notebook_id)
 
 
@@ -73,7 +66,10 @@ def rename_notebook(
     cleaned_name = None
     if new_name is not None:
         cleaned_name = validate_and_clean_text(
-            new_name, MAX_NOTEBOOK_NAME_LEN, required=True, field_name="Notebook Name"
+            new_name,
+            cfg.MAX_NOTEBOOK_NAME_LEN,
+            required=True,
+            field_name="Notebook Name",
         )
 
     # Validate description if provided
@@ -81,7 +77,7 @@ def rename_notebook(
     if new_description is not None:
         cleaned_desc = validate_and_clean_text(
             new_description,
-            MAX_DESCRIPTION_LEN,
+            cfg.MAX_DESCRIPTION_LEN,
             required=False,
             field_name="Description",
         )
@@ -107,7 +103,7 @@ def add_source(
     source_id: Optional[str] = None,
 ) -> str:
     cleaned_filename = validate_and_clean_text(
-        file_name, MAX_FILENAME_LEN, required=True, field_name="Filename"
+        file_name, cfg.MAX_FILENAME_LEN, required=True, field_name="Filename"
     )
 
     cleaned_filetype = validate_and_clean_text(
@@ -147,7 +143,7 @@ def get_sources_for_notebook(notebook_id: str) -> List[Dict[str, Any]]:
     return crud.get_sources_for_notebook(notebook_id)
 
 
-def delete_source(source_id: str) -> None:
+def delete_source(source_id: str) -> bool:
     return crud.delete_source(source_id)
 
 
@@ -156,7 +152,7 @@ def rename_source(source_id: str, new_file_name: Optional[str] = None) -> None:
     cleaned_name = None
     if new_file_name is not None:
         cleaned_name = validate_and_clean_text(
-            new_file_name, MAX_FILENAME_LEN, required=True, field_name="Filename"
+            new_file_name, cfg.MAX_FILENAME_LEN, required=True, field_name="Filename"
         )
 
     if cleaned_name is None:
@@ -177,9 +173,9 @@ def add_chat_message(
     sources: Optional[List[Dict[str, Any]]] = None,
     found_answer: Optional[bool] = None,
 ) -> str:
-    if role not in [USER_ROLE_NAME, ASSISTANT_ROLE_NAME]:
+    if role not in [cfg.USER_ROLE_NAME, cfg.ASSISTANT_ROLE_NAME]:
         raise ValueError(
-            f"Invalid role: {role}. Must be '{USER_ROLE_NAME}' or '{ASSISTANT_ROLE_NAME}'."
+            f"Invalid role: {role}. Must be '{cfg.USER_ROLE_NAME}' or '{cfg.ASSISTANT_ROLE_NAME}'."
         )
 
     if not clean_spaces(content):
@@ -192,14 +188,14 @@ def get_chat_history(notebook_id: str) -> List[Dict[str, Any]]:
     return crud.get_chat_history(notebook_id)
 
 
-def delete_chat_history(notebook_id: str) -> None:
+def delete_chat_history(notebook_id: str) -> bool:
     """Delete all chat messages for a notebook."""
     return crud.delete_chat_messages(notebook_id)
 
 
 def add_note(notebook_id: str, title: str, content: str) -> str:
     cleaned_title = validate_and_clean_text(
-        title, MAX_NOTE_TITLE_LEN, required=True, field_name="Note Title"
+        title, cfg.MAX_NOTE_TITLE_LEN, required=True, field_name="Note Title"
     )
 
     # Note content is allowed to be long and maintain whitespace/newlines!
@@ -216,11 +212,61 @@ def update_note(
     cleaned_title = None
     if title is not None:
         cleaned_title = validate_and_clean_text(
-            title, MAX_NOTE_TITLE_LEN, required=True, field_name="Note Title"
+            title, cfg.MAX_NOTE_TITLE_LEN, required=True, field_name="Note Title"
         )
 
     return crud.update_note(note_id, cleaned_title, content)
 
 
-def delete_note(note_id: str) -> None:
+def delete_note(note_id: str) -> bool:
     return crud.delete_note(note_id)
+
+
+def get_notebook_settings(notebook_id: str) -> Optional[Dict[str, Any]]:
+    return crud.get_notebook_settings(notebook_id)
+
+
+def delete_notebook_settings(notebook_id: str) -> bool:
+    return crud.delete_notebook_settings(notebook_id)
+
+
+def upsert_notebook_settings(notebook_id: str, settings: Dict[str, Any]) -> None:
+    # 1. Define the validation schema
+    # Format: "key": (min_val, max_val)
+    validation_map: Dict[str, tuple[int | float, int | float]] = {
+        "rag_retrieval_k": (cfg.RAG_RETRIEVAL_K_MIN, cfg.RAG_RETRIEVAL_K_MAX),
+        "rag_retrieval_min_results": (
+            cfg.RAG_RETRIEVAL_MIN_RESULTS_MIN,
+            cfg.RAG_RETRIEVAL_MIN_RESULTS_MAX,
+        ),
+        "rag_retrieval_score_threshold": (
+            cfg.RAG_RETRIEVAL_SCORE_THRESHOLD_MIN,
+            cfg.RAG_RETRIEVAL_SCORE_THRESHOLD_MAX,
+        ),
+        "rag_max_chunk_len": (cfg.RAG_MAX_CHUNK_LEN_MIN, cfg.RAG_MAX_CHUNK_LEN_MAX),
+        "rag_chunk_overlap": (cfg.RAG_CHUNK_OVERLAP_MIN, cfg.RAG_CHUNK_OVERLAP_MAX),
+        "rag_max_ctx_len": (cfg.RAG_MAX_CTX_LEN_MIN, cfg.RAG_MAX_CTX_LEN_MAX),
+        "max_msg_history": (cfg.MAX_MSG_HISTORY_MIN, cfg.MAX_MSG_HISTORY_MAX),
+        "llm_num_ctx": (cfg.LLM_NUM_CTX_MIN, cfg.LLM_NUM_CTX_MAX),
+        "llm_temp": (cfg.LLM_TEMPERATURE_MIN, cfg.LLM_TEMPERATURE_MAX),
+    }
+
+    # 2. Iterate and Validate
+    for key, (min_val, max_val) in validation_map.items():
+        value = settings.get(key)
+
+        # Only validate if the key is actually present in the dict
+        if value is not None and isinstance(value, (int, float)):
+            if not (min_val <= value <= max_val):
+                raise ValueError(
+                    f"Invalid {key}: {value}. Must be between {min_val} and {max_val}."
+                )
+
+    # 3. Save to Database
+    try:
+        crud.upsert_notebook_settings(notebook_id, settings)
+    except Exception as e:
+        # Wrap database errors in a more descriptive context
+        raise RuntimeError(
+            f"Failed to update settings for notebook {notebook_id}: {str(e)}"
+        )

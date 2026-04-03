@@ -1,11 +1,11 @@
-from typing import Dict, List
-from langchain_core.prompts import PromptTemplate
+from typing import Dict, List, Optional
+from datetime import datetime, timezone
 
-APP_NAME = "SmartDoc AI"
-APP_FULLNAME = "SmartDoc - Your AI Research Assistant"
+APP_NAME: str = "SmartDoc AI"
+APP_FULLNAME: str = "SmartDoc - Your AI Research Assistant"
 
-DB_NAME = "smartdoc"
-DB_ROOT_PATH = f"./data/{DB_NAME}.db"
+DB_NAME: str = "smartdoc"
+DB_ROOT_PATH: str = f"./data/{DB_NAME}.db"
 
 USER_ROLE_NAME: str = "user"
 ASSISTANT_ROLE_NAME: str = "assistant"
@@ -13,18 +13,26 @@ NOTEBOOK_DEFAULT_NAME: str = "Untitled Notebook"
 SOURCE_DEFAULT_NAME: str = "Untitled Document"
 NOTE_DEFAULT_TITLE: str = "Untitled Note"
 
-MAX_NOTEBOOK_NAME_LEN = 50
-MAX_DESCRIPTION_LEN = 200
-MAX_FILENAME_LEN = 100
-MAX_NOTE_TITLE_LEN = 80
+MAX_NOTEBOOK_NAME_LEN: int = 50
+MAX_DESCRIPTION_LEN: int = 200
+MAX_FILENAME_LEN: int = 100
+MAX_NOTE_TITLE_LEN: int = 80
 
-EMBEDDING_MODEL_NAME = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
+EMBEDDING_MODEL_NAME: str = (
+    "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
+)
 
 # Maximum number of past messages (user + assistant) to keep in conversation history for context (higher = more context but may cause CUDA OOM)
-MAX_MSG_HISTORY = 10
+MAX_MSG_HISTORY: int = 10
 
-# Use this answer as a fallback when LLM generate an empty response after tag removal (in random rare cases), to prevent DB insertion error and ensure user gets a response even if LLM fails to generate text
-NOT_FOUND_ANSWER_FALL_BACK = "Sorry, I couldn't find any relevant information in the documents to answer your question. Please try rephrasing or ask about a different topic."
+# Number of chunks to use for summary generation
+TOP_K_CHUNKS_FOR_SUMMARY: int = 3
+
+# Number of chunks to use for suggested questions generation
+TOP_K_CHUNKS_FOR_QUESTIONS: int = 3
+
+# Use this answer as a fallback when LLM generate an empty response after tag removal (in random rare cases), also to prevent DB insertion error and ensure user gets a response even if LLM fails to generate text
+NOT_FOUND_ANSWER_FALL_BACK: str = "Sorry, I couldn't find any relevant information in the documents to answer your question. Please try rephrasing or ask about a different topic."
 
 # ============================================================================
 # MULTI-LANGUAGE GREETING PATTERNS
@@ -34,7 +42,7 @@ NOT_FOUND_ANSWER_FALL_BACK = "Sorry, I couldn't find any relevant information in
 
 # Fallback patterns (English only) - used when language detection fails
 # This is a safety net to ensure greetings are still detected even without langdetect
-DEFAULT_EN_GREETING_PATTERNS = [
+DEFAULT_EN_GREETING_PATTERNS: list[str] = [
     # ==== GREETINGS ====
     r"^(hi|hello|hey|greetings|welcome)",
     r"^(good morning|good afternoon|good evening|good day)",
@@ -46,6 +54,9 @@ DEFAULT_EN_GREETING_PATTERNS = [
     r"^can you introduce yourself",
     r"^tell me.*about yourself",
     r"^introduce yourself",
+    r"^do you know my",
+    r"^do you remember",
+    r"^can you remember",
     # ==== CAPABILITIES & PURPOSE ====
     r"^what can you do",
     r"^what.*your purpose",
@@ -102,6 +113,7 @@ GREETING_PATTERNS_BY_LANGUAGE: Dict[str, List[str]] = {
         # ==== INTRODUCTIONS & IDENTITY ====
         r"^(bạn là ai|bạn tên gì|tên của bạn)",
         r"^(bạn có phải|giới thiệu|hãy giới thiệu)",
+        r"^(bạn có biết tên|bạn còn nhớ)",
         # ==== CAPABILITIES & PURPOSE ====
         r"^(bạn có thể|bạn sẽ làm gì|mục đích của bạn)",
         r"^(bạn hỗ trợ|bạn giúp tôi)",
@@ -163,129 +175,225 @@ GREETING_PATTERNS_BY_LANGUAGE: Dict[str, List[str]] = {
 }
 
 # Prompt template for rephrasing follow-up questions into standalone questions for better retrieval. This is crucial for handling conversational queries that rely on previous context.
-REPHRASE_PROMPT = """You are a question reformulation specialist for document retrieval systems.
+REPHRASE_PROMPT: str = """You are a question reformulation specialist for a multi-lingual document retrieval system.
 
-TASK: Transform a follow-up user question into a standalone question that can be
-searched in a document vector database.
+TASK: Analyze the chat history and transform the latest user question into a standalone question optimized for vector database search.
 
 RULES:
-1. **Preserve Intent**: Keep all key terms, numbers, and constraints from the original question
-2. **Replace References**: Replace pronouns and ambiguous references with explicit terms
-   from previous exchanges
-   - "it" → actual topic name
-   - "that approach" → specific approach mentioned
-   - "the other one" → actual item name
-3. **Add Context**: Include relevant context from chat history that clarifies the question
-4. **Keep Concise**: Use 1-2 sentences maximum, optimized for vector database search
-5. **Domain-Specific**: Use terminology that would appear in documents (e.g., "machine learning"
-   instead of "that thing you mentioned")
-6. **No Answering**: Only rephrase the question; do NOT provide answers or explanations
+1. **Preserve Intent & Language**: Keep all key terms. **CRITICAL**: DO NOT TRANSLATE. The reformulated question MUST be in the exact same language as the ORIGINAL latest user question. If the user asks in English, the output MUST be in English.
+2. **Replace References**: Replace pronouns ("it", "they", "this", "đó") and ambiguous references with explicit terms from the chat history.
+3. **Handle Standalone Queries**: If the latest question makes perfect sense on its own and does not rely on previous context, return it EXACTLY as it is. Do not add unnecessary history.
+4. **Keep Concise**: Output ONLY the rephrased question. No introductory phrases, no explanations, no formatting tags.
+5. **Domain-Specific**: Use specific terminology mentioned previously rather than vague descriptions.
 
 EXAMPLES:
-- Original: "How does it work?"
-  History: Previous question was about photosynthesis
-  Output: "How does the photosynthesis process work?"
+- History: User: What is photosynthesis? -> AI: [explanation]
+  Original: How does it work?
+  Output: How does the photosynthesis process work?
 
-- Original: "What about the other approach?"
-  History: Discussed neural networks and decision trees
-  Output: "What are the advantages and disadvantages of the decision tree approach compared to neural networks?"
+- History: User: AI có thể dùng Neural Networks hoặc Decision Trees. -> AI: [explanation]
+  Original: Vậy phương pháp thứ hai có ưu điểm gì?
+  Output: Decision Trees có ưu điểm gì?
 
-Format your response as just the rephrased question, no other text."""
+- History: User: Hello, my name is John -> AI: Nice to meet you John.
+  Original: Do you know my name?
+  Output: Does the AI know the user's name is John?
+
+- History: User: Xin chào -> AI: Chào bạn, tôi có thể giúp gì?
+  Original: RAG là gì?
+  Output: RAG là gì?"""
+
+# ============================================================================
+# DOCUMENT PROCESSING PROMPTS
+# ============================================================================
+
+SUMMARY_PROMPT: str = """You are a highly capable document analyst.
+
+TASK: Analyze the provided document text and write a brief 2-3 sentence overview of its main topics.
+
+RULES:
+1. **Be Concise**: Limit your answer to exactly 2-3 sentences.
+2. **Language Matching**: You MUST write the summary in the EXACT SAME LANGUAGE as the provided text (e.g., if the text is in Vietnamese, write in Vietnamese).
+3. **No Fluff**: DO NOT include introductory conversational phrases (e.g., "Here is a summary", "This document is about"). Just output the summary directly.
+
+<document_text>
+{text}
+</document_text>
+
+SUMMARY:"""
+
+SUGGESTED_QUESTIONS_PROMPT: str = """You are an expert educational assistant building a study guide.
+
+TASK: Analyze the provided document text and generate exactly 3 specific, interesting, and diverse questions that a reader might ask to test their knowledge of this text.
+
+RULES:
+1. **Format**: Format EXACTLY as a numbered list (1., 2., 3.). Do NOT use bolding or markdown for the numbers.
+2. **Accuracy**: Questions MUST be directly answerable using only the provided text.
+3. **Language Matching**: You MUST write the questions in the EXACT SAME LANGUAGE as the provided text.
+4. **No Fluff**: DO NOT include conversational filler, introductory text, or concluding remarks. Output ONLY the 3 numbered questions.
+
+<document_text>
+{text}
+</document_text>
+
+QUESTIONS:"""
 
 # ============================================================================
 # RAG RETRIEVAL CONFIGURATIONS - Optimize these for your use case
 # ============================================================================
 # Maximum number of chunks to retrieve (higher = more context but may cause CUDA OOM)
-RAG_RETRIEVAL_K = 8
+RAG_RETRIEVAL_K: int = 8
 
 # Minimum results to guarantee even if quality threshold filters out too much
-RAG_RETRIEVAL_MIN_RESULTS = 1
+RAG_RETRIEVAL_MIN_RESULTS: int = 1
 
-# Similarity score threshold for quality filtering (FAISS distance: lower = better match)
+# Euclidean Distance (L2): similarity score threshold for quality filtering (FAISS distance: lower = better match)
 # Typical range: 5.0-15.0. Lower = stricter filtering (fewer chunks but higher quality)
-RAG_RETRIEVAL_SCORE_THRESHOLD = 15.0
+RAG_RETRIEVAL_SCORE_THRESHOLD: float = 15.0
 
 # Max length per chunk in characters (prevents extremely long single chunks)
-RAG_MAX_CHUNK_LENGTH = 1000
+RAG_MAX_CHUNK_LEN: int = 1000
 
-# 20% of chunk length overlap between chunks to preserve context
-RAG_CHUNK_OVERLAP = round(0.2 * RAG_MAX_CHUNK_LENGTH)
+# Typically 20% of chunk length overlap between chunks to preserve context
+RAG_CHUNK_OVERLAP: int = round(0.2 * RAG_MAX_CHUNK_LEN)
 
 # Max total context length in characters to send to LLM (prevents CUDA OOM)
-RAG_MAX_CONTEXT_LENGTH = RAG_RETRIEVAL_K * RAG_MAX_CHUNK_LENGTH
+RAG_MAX_CTX_LEN: int = RAG_RETRIEVAL_K * RAG_MAX_CHUNK_LEN
 
 # ============================================================================
 # LLM CONFIGURATIONS
 # ============================================================================
 
-# Prioritize general language response but mainly for English
-LLM_PROMPT_TEMPLATE = PromptTemplate(
-    template="""You are a helpful research assistant. Answer the user's question using the provided document context.
 
-ANSWER GUIDELINES:
-1. Answer using information from the provided context. Prioritize it over general knowledge.
-2. Look carefully through ALL context segments — the answer may be implicit, partial, or spread across multiple sections.
-3. If the context contains relevant information (even indirect or partial), use it to form your best answer.
-4. Do NOT invent specific facts, numbers, names, or data that are not present in the context.
-5. Cite source page numbers naturally when referencing specific information.
-6. **Language Detection & Accuracy**:
-   - Detect the language of the USER QUESTION and respond (include greeting, chit-chat, .etc) in that same language, specifically for English, Vietnamese, and Mandarin Chinese.
-   - The response of the detected language should be natural and professional, especially for English.
-   - **CRITICAL**: Do NOT translate technical keywords, proper names, or industry-standard terms (e.g., "RAG", "LLM", "FAISS", "Machine Learning", "Database", "API"). Keep them in their original form.
-7. Only say you cannot find the answer if the context has NO information related to the topic at all.
-8. **Tone**: Be concise but thorough. Ensure the sentence structure is natural to the detected language.
+def get_sys_prompt(custom_instructions: Optional[str] = None) -> str:
+    """
+    Get enhanced system prompt with current time, general knowledge permission,
+    and strict XML boundaries for RAG processing.
+    """
+    # Using a slightly cleaner time format for readability
+    current_time = datetime.now(timezone.utc).strftime("%A, %B %d, %Y at %H:%M UTC")
 
-IMPORTANT — End your response with exactly ONE of these tags (no text after it):
-- [FOUND_ANSWER: true]  — the context contained useful information to answer the question
-- [FOUND_ANSWER: false] — the context had absolutely no information related to this topic
+    base_role = (
+        f"You are {APP_NAME}, a highly capable and professional research assistant."
+    )
+    override_block = (
+        f"\nADDITIONAL USER INSTRUCTIONS:\n{custom_instructions}\n"
+        if custom_instructions
+        else ""
+    )
 
-CONTEXT FROM DOCUMENTS:
-{context}
+    enhanced_prompt = f"""{base_role}
+Current Time: {current_time}
+{override_block}
+ROLE & BEHAVIOR:
+You answer user questions based primarily on the provided `<context>`. If the user asks general questions, greetings, or about your capabilities, you may use your internal knowledge.
 
-USER QUESTION: {question}
+STRICT GUIDELINES:
+1. **Document-Based Q&A**:
+   - If the question asks for facts, summaries, or specific data, search the `<context>` thoroughly.
+   - Do NOT hallucinate or invent facts, numbers, or names not present in the context.
+   - Cite source page numbers naturally if they are available in the context.
 
-YOUR ANSWER:""",
-    input_variables=["context", "question"],
-)
+2. **General Knowledge & Greetings**:
+   - If the user says "Hello," asks for the time, or asks a broad question clearly outside the scope of the documents, answer naturally using your general knowledge.
 
-# Prioritize general language response but mainly for Vietnamese
-# LLM_PROMPT_TEMPLATE = PromptTemplate(
-#     template="""You are a helpful research assistant. Answer the user's question using the provided document context.
+3. **Language & Formatting**:
+   - Respond in the EXACT language of the user's question.
+   - **CRITICAL**: Do NOT translate technical keywords (e.g., "RAG", "LLM", "API", "Database"). Keep them in their original form.
+   - Use Markdown (bullet points, bold text) to structure your answer cleanly.
 
-# ANSWER GUIDELINES:
-# 1. Answer using information from the provided context. Prioritize it over general knowledge.
-# 2. Look carefully through ALL context segments — the answer may be implicit, partial, or spread across multiple sections.
-# 3. If the context contains relevant information (even indirect or partial), use it to form your best answer.
-# 4. Do NOT invent specific facts, numbers, names, or data that are not present in the context.
-# 5. Cite source page numbers naturally when referencing specific information.
-# 6. **Language Detection & Accuracy**:
-#    - Detect the language of the USER QUESTION and respond (include greeting, chit-chat, .etc) in that same language, specifically for Vietnamese, English and Mandarin Chinese.
-#    - The response of the detected language should be natural and professional, especially for Vietnamese.
-#    - **CRITICAL**: Do NOT translate technical keywords, proper names, or industry-standard terms (e.g., "RAG", "LLM", "FAISS", "Machine Learning", "Database", "API"). Keep them in their original form.
-# 7. Only say you cannot find the answer if the context has NO information related to the topic at all.
-# 8. **Tone**: Be concise but thorough. Ensure the sentence structure is natural to the detected language.
+TAGGING REQUIREMENT (CRITICAL):
+You MUST end your final response with exactly ONE of the following tags on a new line. Do not write anything after the tag:
+- [STATUS: DOC_ANSWER] — You successfully answered the question using information found in the context.
+- [STATUS: DOC_MISSING] — The user asked about a specific topic, but the context lacked the information. (You must politely explain that the requested information is not available in the documents).
+- [STATUS: GENERAL] — The user asked a greeting or general question, and you answered from your internal knowledge.
 
-# IMPORTANT — End your response with exactly ONE of these tags (no text after it):
-# - [FOUND_ANSWER: true]  — the context contained useful information to answer the question
-# - [FOUND_ANSWER: false] — the context had absolutely no information related to this topic
+<context>
+{{context}}
+</context>
 
-# CONTEXT FROM DOCUMENTS:
-# {context}
+<user_question>
+{{question}}
+</user_question>
 
-# USER QUESTION: {question}
+YOUR ANSWER:"""
 
-# YOUR ANSWER:""",
-#     input_variables=["context", "question"],
-# )
+    return enhanced_prompt
 
-LLM_MODEL_NAME = "qwen2.5:7b"
-LLM_BASE_URL = "http://localhost:11434"
+
+LLM_MODEL_NAME: str = "qwen2.5:7b"
+OLLAMA_BASE_URL: str = "http://localhost:11434"
 
 # Low temperature for factual, grounded answers, higher may be more creative but less accurate
-LLM_TEMPERATURE = 0.7
+LLM_TEMPERATURE: float = 0.7
 
 # Context window size
-LLM_NUM_CTX = 4096
+LLM_NUM_CTX: int = 4096
 
 # Set to True to enable detailed debug prints during RAG chain creation and query processing
-PRINT_DEBUG = True
+PRINT_DEBUG: bool = True
+
+# ============================================================================
+# USER SETTINGS CONFIGURATIONS
+# ============================================================================
+
+# Retrieval k
+RAG_RETRIEVAL_K_MIN: int = 1
+RAG_RETRIEVAL_K_MAX: int = 20
+RAG_RETRIEVAL_K_STEP: int = 1
+RAG_RETRIEVAL_K_HELP_MSG: str = "Number of document chunks to retrieve for context. Higher values provide more information but may cause slower responses or GPU memory issues."
+
+# Retrieval minimum results
+RAG_RETRIEVAL_MIN_RESULTS_MIN = 0
+RAG_RETRIEVAL_MIN_RESULTS_MAX = 10
+RAG_RETRIEVAL_MIN_RESULTS_STEP = 1
+RAG_RETRIEVAL_MIN_RESULTS_HELP_MSG = "Minimum number of retrieved chunks to use as context, even if they don't meet the quality threshold. This ensures the AI always has some information to work with, but may reduce answer quality if set too high."
+
+# Retrieval score threshold
+RAG_RETRIEVAL_SCORE_THRESHOLD_MIN: float = 0.0
+RAG_RETRIEVAL_SCORE_THRESHOLD_MAX: float = 15.0
+RAG_RETRIEVAL_SCORE_THRESHOLD_STEP: float = 0.05
+RAG_RETRIEVAL_SCORE_THRESHOLD_HELP_MSG: str = "Similarity score threshold for filtering retrieved chunks (lower = stricter). Adjust based on your documents and embedding model for best results."
+
+# Max chunk length
+RAG_MAX_CHUNK_LEN_MIN: int = 500
+RAG_MAX_CHUNK_LEN_MAX: int = 5000
+RAG_MAX_CHUNK_LEN_STEP: int = 100
+RAG_MAX_CHUNK_LEN_HELP_MSG: str = "Maximum length of each document chunk in characters. Longer chunks provide more context but may reduce retrieval precision. Adjust based on your document structure."
+
+# Chunk overlap
+RAG_CHUNK_OVERLAP_MIN: int = 0
+RAG_CHUNK_OVERLAP_MAX: int = 1000
+RAG_CHUNK_OVERLAP_STEP: int = 50
+RAG_CHUNK_OVERLAP_HELP_MSG: str = "Number of overlapping characters between consecutive chunks. Overlap helps preserve context across chunks but increases total tokens sent to the LLM. Typically set to around 20% of max chunk length."
+
+# Max context length
+RAG_MAX_CTX_LEN_MIN: int = 1000
+RAG_MAX_CTX_LEN_MAX: int = 50000
+RAG_MAX_CTX_LEN_STEP: int = 1000
+RAG_MAX_CTX_LEN_HELP_MSG: str = "Maximum total length of all retrieved chunks combined to send to the LLM. Higher values allow more context but may cause slower responses or GPU memory issues. Adjust based on your documents and LLM capabilities."
+
+# Max message history
+MAX_MSG_HISTORY_MIN: int = 0
+MAX_MSG_HISTORY_MAX: int = 50
+MAX_MSG_HISTORY_STEP: int = 1
+MAX_MSG_HISTORY_HELP_MSG: str = "Maximum number of past messages (user + assistant) to keep in conversation history for context. Higher values provide more context but may cause slower responses or GPU memory issues."
+
+# LLM Model Name
+LLM_MODEL_NAME_HELP_MSG: str = "The 🧠 of your assistant. Larger models (e.g., 14b+) are smarter but require more VRAM. Smaller models (7b) are faster and require less VRAM."
+
+# LLM Number of Context Tokens
+LLM_NUM_CTX_MIN: int = 1024
+LLM_NUM_CTX_MAX: int = 32000
+LLM_NUM_CTX_STEP: int = 512
+LLM_NUM_CTX_HELP_MSG: str = "The AI's total short-term memory (1k tokens ≈ 750 words). Higher values allow more sources and longer history but increase GPU RAM usage."
+
+# LLM Temperature
+LLM_TEMPERATURE_MIN: float = 0.0
+LLM_TEMPERATURE_MAX: float = 1.0
+LLM_TEMPERATURE_STEP: float = 0.05
+LLM_TEMPERATURE_HELP_MSG: str = "Controls creativity. Range 0.1 - 0.3 is best for factual research and citations. 0.7-0.9 is better for brainstorming and creative summaries."
+
+# System Prompt Override
+SYS_PROMPT_HELP_MSG: str = "Custom instructions to guide the AI's behavior and personality. Leave empty to use the default prompt."
+SYS_PROMPT_PLACEHOLDER: str = "You are a helpful, respectful, and honest assistant..."

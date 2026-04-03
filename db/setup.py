@@ -1,8 +1,8 @@
 import sqlite3
-from core.configs import DB_ROOT_PATH, USER_ROLE_NAME, ASSISTANT_ROLE_NAME
+import core.configs as cfg
 
 
-def init_db(db_name: str = DB_ROOT_PATH, print_debug: bool = False) -> None:
+def init_db(db_name: str = cfg.DB_ROOT_PATH, print_debug: bool = False) -> None:
     # Connect to the local SQLite file
     conn = sqlite3.connect(db_name)
     cursor = conn.cursor()
@@ -59,7 +59,7 @@ def init_db(db_name: str = DB_ROOT_PATH, print_debug: bool = False) -> None:
         CREATE TABLE IF NOT EXISTS chat_messages (
             id TEXT PRIMARY KEY NOT NULL,
             notebook_id TEXT NOT NULL,
-            role VARCHAR(50) CHECK(role IN ('{USER_ROLE_NAME}', '{ASSISTANT_ROLE_NAME}')) NOT NULL,
+            role VARCHAR(50) CHECK(role IN ('{cfg.USER_ROLE_NAME}', '{cfg.ASSISTANT_ROLE_NAME}')) NOT NULL,
             content TEXT NOT NULL,
             sources TEXT, -- Stored as JSON string
             found_answer INTEGER DEFAULT 1, -- 1=True (found), 0=False (not found)
@@ -67,6 +67,30 @@ def init_db(db_name: str = DB_ROOT_PATH, print_debug: bool = False) -> None:
             FOREIGN KEY (notebook_id) REFERENCES notebooks (id) ON DELETE CASCADE
         )
     """)
+
+    # 5. Create Notebook Settings Table
+    cursor.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS notebook_settings (
+            id TEXT PRIMARY KEY NOT NULL,
+            notebook_id TEXT NOT NULL UNIQUE,
+            rag_retrieval_k INTEGER DEFAULT {cfg.RAG_RETRIEVAL_K},
+            rag_retrieval_min_results INTEGER DEFAULT {cfg.RAG_RETRIEVAL_MIN_RESULTS},
+            rag_retrieval_score_threshold REAL DEFAULT {cfg.RAG_RETRIEVAL_SCORE_THRESHOLD},
+            rag_max_chunk_len INTEGER DEFAULT {cfg.RAG_MAX_CHUNK_LEN},
+            rag_chunk_overlap INTEGER DEFAULT {cfg.RAG_CHUNK_OVERLAP},
+            rag_max_ctx_len INTEGER DEFAULT {cfg.RAG_MAX_CTX_LEN},
+            max_msg_history INTEGER DEFAULT {cfg.MAX_MSG_HISTORY},
+            llm_model_name VARCHAR(255) DEFAULT '{cfg.LLM_MODEL_NAME}',
+            llm_num_ctx INTEGER DEFAULT {cfg.LLM_NUM_CTX},
+            llm_temp REAL DEFAULT {cfg.LLM_TEMPERATURE},
+            sys_prompt_override TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (notebook_id) REFERENCES notebooks (id) ON DELETE CASCADE
+        )
+        """
+    )
 
     conn.commit()
     conn.close()

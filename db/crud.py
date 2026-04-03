@@ -50,9 +50,11 @@ def get_notebook(notebook_id: str) -> Optional[Dict[str, Any]]:
         return dict(row) if row else None
 
 
-def delete_notebook(notebook_id: str) -> None:
+def delete_notebook(notebook_id: str) -> bool:
     with get_connection() as conn:
-        conn.execute("DELETE FROM notebooks WHERE id = ?", (notebook_id,))
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM notebooks WHERE id = ?", (notebook_id,))
+        return cursor.rowcount > 0
 
 
 def update_notebook(
@@ -175,9 +177,11 @@ def get_source_by_hash_and_notebook(
         return dict(row) if row else None
 
 
-def delete_source(source_id: str) -> None:
+def delete_source(source_id: str) -> bool:
     with get_connection() as conn:
-        conn.execute("DELETE FROM sources WHERE id = ?", (source_id,))
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM sources WHERE id = ?", (source_id,))
+        return cursor.rowcount > 0
 
 
 def update_source(
@@ -257,10 +261,14 @@ def get_chat_history(notebook_id: str) -> List[Dict[str, Any]]:
         return history
 
 
-def delete_chat_messages(notebook_id: str) -> None:
+def delete_chat_messages(notebook_id: str) -> bool:
     """Delete all chat messages for a notebook."""
     with get_connection() as conn:
-        conn.execute("DELETE FROM chat_messages WHERE notebook_id = ?", (notebook_id,))
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM chat_messages WHERE notebook_id = ?", (notebook_id,)
+        )
+        return cursor.rowcount > 0
 
 
 # ==========================================
@@ -312,6 +320,76 @@ def update_note(
         conn.execute(sql, params)
 
 
-def delete_note(note_id: str) -> None:
+def delete_note(note_id: str) -> bool:
     with get_connection() as conn:
-        conn.execute("DELETE FROM notes WHERE id = ?", (note_id,))
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM notes WHERE id = ?", (note_id,))
+        return cursor.rowcount > 0
+
+
+def get_notebook_settings(notebook_id: str) -> Optional[Dict[str, Any]]:
+    with get_connection() as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM notebook_settings WHERE notebook_id = ?", (notebook_id,)
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+
+def delete_notebook_settings(notebook_id: str) -> bool:
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM notebook_settings WHERE notebook_id = ?", (notebook_id,)
+        )
+        return cursor.rowcount > 0
+
+
+def upsert_notebook_settings(notebook_id: str, settings: Dict[str, Any]) -> None:
+    setting_id = str(uuid.uuid4())
+
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO notebook_settings (
+                id, notebook_id, rag_retrieval_k, rag_retrieval_min_results,
+                rag_retrieval_score_threshold, rag_max_chunk_len,
+                rag_chunk_overlap, rag_max_ctx_len, max_msg_history,
+                llm_model_name, llm_num_ctx, llm_temp, sys_prompt_override,
+                updated_at
+            ) VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP
+            ) ON CONFLICT(notebook_id) DO UPDATE SET
+                rag_retrieval_k=excluded.rag_retrieval_k,
+                rag_retrieval_min_results=excluded.rag_retrieval_min_results,
+                rag_retrieval_score_threshold=excluded.rag_retrieval_score_threshold,
+                rag_max_chunk_len=excluded.rag_max_chunk_len,
+                rag_chunk_overlap=excluded.rag_chunk_overlap,
+                rag_max_ctx_len=excluded.rag_max_ctx_len,
+                max_msg_history=excluded.max_msg_history,
+                llm_model_name=excluded.llm_model_name,
+                llm_num_ctx=excluded.llm_num_ctx,
+                llm_temp=excluded.llm_temp,
+                sys_prompt_override=excluded.sys_prompt_override,
+                updated_at=CURRENT_TIMESTAMP;
+            """,
+            (
+                setting_id,
+                notebook_id,
+                settings.get("rag_retrieval_k"),
+                settings.get("rag_retrieval_min_results"),
+                settings.get("rag_retrieval_score_threshold"),
+                settings.get("rag_max_chunk_len"),
+                settings.get("rag_chunk_overlap"),
+                settings.get("rag_max_ctx_len"),
+                settings.get("max_msg_history"),
+                settings.get("llm_model_name"),
+                settings.get("llm_num_ctx"),
+                settings.get("llm_temp"),
+                settings.get("sys_prompt_override"),
+            ),
+        )
+        conn.commit()
