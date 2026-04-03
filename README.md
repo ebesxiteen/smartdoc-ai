@@ -7,7 +7,7 @@
 ## 🌟 Features
 
 - **⚙️ Notebook Settings**: Customize memory, retrieval count, score thresholds, and prompts independently per notebook natively via UI.
-- **📚 Document Hub**: Upload and manage multiple PDF and Word documents in organized notebooks
+- **📚 Document Hub**: Manage PDF and Word documents, track real-time hardware status (RAM/VRAM), and configure intelligent settings with hardware-aware warnings.
 - **🔍 Semantic Search**: Intelligently retrieve the most relevant document sections using FAISS vector embeddings
 - **🤖 Grounded AI Responses**: Get answers strictly based on your documents with automatic source citations
 - **🌐 Multi-language Support**: Ask questions in Vietnamese, English, or other languages and receive answers in your preferred language
@@ -122,7 +122,7 @@ All tunable parameters are centralized in [core/configs.py](./core/configs.py):
 ```python
 # RAG Tuning (adjust for inference quality vs speed)
 RAG_RETRIEVAL_K: int = 8         # Top K chunks to retrieve
-RAG_RETRIEVAL_SCORE_THRESHOLD: float = 15.0  # Lower = stricter filtering
+RAG_RETRIEVAL_SCORE_THRESHOLD: float = 1.0  # Euclidean distance (0.0 to 2.0); Lower = stricter filtering
 RAG_MAX_CTX_LEN: int = RAG_RETRIEVAL_K * 1000 # Characters sent to LLM
 
 # LLM Setup

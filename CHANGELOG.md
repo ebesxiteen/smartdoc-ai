@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Local Hardware Dashboard**: Display local machine hardware capabilities (RAM, VRAM, OS, CPU, GPU) in the `Source Hub` section.
+- **Hardware-Aware Warnings**: Added intelligent warning messages based on local machine hardware limitations when configuring notebook settings (e.g., warning if trying to load a massive model on limited VRAM).
 - **Word Document Support**: Upload and process `.docx` files alongside PDFs.
 - **Answer Generation Resume**: Auto-resume answer generation if the process is interrupted (e.g., if the user accidentally refreshes the page or unselects all resources during generation).
 - **Confirm Dialog For Deletions**: Added confirmation dialogs for all deletion actions (notebooks, sources, notes, chat history) to prevent accidental data loss.
@@ -18,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Personal Context Setting**: Renamed `notebook_setting.sys_prompt_override` to `personal_ctx` for better clarity in the codebase and UI.
+- **Settings Save Optimization**: Re-engineered the 'Apply Settings' logic to selectively update system state, minimizing unnecessary RAG pipeline reloads.
 - **RAG Pipeline Conversational Memory**: Rebuilt the LangChain pipeline to natively ingest `chat_message_history`, allowing the LLM to understand contextual follow-up questions while cleanly bypassing FAISS retrieval for standard greetings.
 - **Configuration Refactoring**: Renamed global configuration variables in `configs.py` for better consistency and readability (e.g., `RAG_MAX_CONTEXT_LENGTH` to `RAG_MAX_CTX_LEN`) and globalized the number of first chunks used for summaries and suggested questions.
 - **System & Generation Prompts Optimization**: Modified the base system prompt to enhance LLM performance and globalized the prompts for 'summary' and 'suggested questions'.
@@ -30,6 +34,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **FAISS Score Threshold Range**: Fixed the `RAG_RETRIEVAL_SCORE_THRESHOLD` input constraints to properly restrict values between `0.0` and `2.0` (valid bounds for FAISS Euclidean distance search).
+- **Settings UI Reset UX**: Resolved an issue where Streamlit's slider and input components failed to auto-reset to DB values when the user clicked 'Reset to Default'.
+- **Ghost Toasts Fix**: Fixed missing toast success messages when a user clicked 'Reset to Default' or 'Apply Settings' due to backend execution halts (`st.rerun()`).
+- **Production Logging Noise**: Added missing `print_debug` condition checks to various debug logs in `app.py` to prevent stdout cluttering in production.
 - **Input Text Truncation Handling**: Prevented silent truncation of user input before saving to the database by throwing an explicit error when limits are exceeded. Ensured LLM-generated fields like `source.summary` and `source.suggested_questions` are not restricted by truncation, preserving data integrity.
 - **Middle Floating `Add Note` Button**: Repositioned the "Add Note" button to a fixed position at the bottom center of the section to improve visibility and accessibility, especially when there are no existing notes.
 - **Unattended Suggested Questions Truncation Display**: Remove auto truncated display of suggested questions and always show full questions in the UI, ensuring users can see all generated suggestions without confusion.
