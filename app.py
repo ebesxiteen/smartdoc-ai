@@ -505,7 +505,8 @@ def process_file(
             )
 
             # Embed with GPU/CPU fallback
-            logger.info(f"🛠️\tCreating embeddings for {num_chunks} chunks")
+            if print_debug:
+                logger.info(f"🛠️\tCreating embeddings for {num_chunks} chunks")
             if progress_callback:
                 progress_callback("Loading embedding model...")
             embeddings = try_load_embeddings()
@@ -548,11 +549,13 @@ def process_file(
             )
 
             # Generate summary
-            logger.info(f"🚀\tGenerating summary for {filename}")
+            if print_debug:
+                logger.info(f"🚀\tGenerating summary for {filename}")
             summary = generate_summary(chunks, notebook_id=notebook_id)
 
             # Generate suggested questions
-            logger.info(f"🚀\tGenerating suggested questions for {filename}")
+            if print_debug:
+                logger.info(f"🚀\tGenerating suggested questions for {filename}")
             suggested_questions = generate_suggested_questions(
                 chunks, notebook_id=notebook_id
             )
@@ -596,7 +599,8 @@ def process_file(
                 notebook_id, st.session_state.selected_sources, print_debug
             )
 
-            logger.info(f'✨\tSuccessfully processed "{filename}"')
+            if print_debug:
+                logger.info(f'✨\tSuccessfully processed "{filename}"')
 
         st.success(f'✨ Successfully loaded "{filename}"')
 
@@ -626,6 +630,10 @@ def go_back_to_notebooks():
 
 def source_hub_ui(print_debug: bool = False):
     """The 'Source Hub' for document management."""
+    from core.utils import get_system_hardware_info
+
+    hw_info = get_system_hardware_info()
+
     st.markdown(
         '<div class="source-hub-bg" style="display:none"></div>', unsafe_allow_html=True
     )
@@ -1105,6 +1113,15 @@ def source_hub_ui(print_debug: bool = False):
         st.error("🔴 Ollama: Offline")
         st.caption("Run: ollama serve")
 
+    # Hardware Dashboard
+    st.markdown("#### System Hardware")
+    col1, col2 = st.columns(2)
+    col1.metric("System RAM", f"{hw_info['ram_gb']} GB")
+    col2.metric("GPU VRAM", f"{hw_info['vram_gb']} GB" if hw_info["vram_gb"] else "N/A")
+    st.caption(
+        f"**OS:** {hw_info['os']} | **CPU:** {hw_info['cpu_cores']} Cores | **GPU:** {hw_info['gpu_name']}"
+    )
+
     st.caption(
         "💡 **Tip:** If you experience GPU out-of-memory errors, try selecting fewer documents before asking questions. "
         "Start with 1-2 documents and gradually add more as needed."
@@ -1313,9 +1330,9 @@ def chat_interface(notebook_name: str, print_debug: bool = False):
                 with st.spinner("🤔 Thinking..."):
                     try:
                         # Get answer and sources via RAG chain with chat history context
-                        logger.info(f"🔡\tProcessing query: {query_to_answer}")
-
                         if print_debug:
+                            logger.info(f"🔡\tProcessing query: {query_to_answer}")
+
                             # Log selected sources
                             logger.info("   " + "━" * 60)
                             logger.info("   📚\tSelected Sources for this Query:")
@@ -1561,14 +1578,14 @@ def create_notebook_modal():
 
 
 def render_notebook_settings_sidebar(notebook_id: str):
-    from core.utils import get_installed_ollama_models
+    from core.utils import get_installed_ollama_models, get_system_hardware_info
 
+    hw_info = get_system_hardware_info()
     settings = (
         db_middleware.get_notebook_settings(notebook_id)
         or get_default_notebook_settings()
     )
     models: List[str] = get_installed_ollama_models()
-    defaults = get_default_notebook_settings()
 
     # Defaults in case the models list is empty or the selected model is not in the list
     if settings["llm_model_name"] not in models:
@@ -1580,35 +1597,27 @@ def render_notebook_settings_sidebar(notebook_id: str):
     if not models:
         models = [cfg.LLM_MODEL_NAME]
 
-    # Force form inputs to reset to DB values when the user "leaves out" without applying.
-    # It detects if a submit action is occurring. If not, it increments the form key.
-    revision_key = f"settings_rev_{notebook_id}"
-    if revision_key not in st.session_state:
-        st.session_state[revision_key] = 0
+    # Use a revision key for all inputs to force complete UI reset when clicking Reset to Default
+    rev_key = f"settings_rev_{notebook_id}"
+    if rev_key not in st.session_state:
+        st.session_state[rev_key] = 0
+    k_suf = f"_{notebook_id}_{st.session_state[rev_key]}"
 
-    is_submitting = False
-    for k in st.session_state.keys():
-        if (
-            k.startswith(f"FormSubmitter:notebook_settings_form_{notebook_id}")  # type: ignore
-            and st.session_state[k] is True
-        ):
-            is_submitting = True
-            break
-
-    if not is_submitting:
-        st.session_state[revision_key] += 1
-
-    form_key = f"notebook_settings_form_{notebook_id}_{st.session_state[revision_key]}"
+    # Handle cross-reload toasts
+    if "settings_toast" in st.session_state and st.session_state.settings_toast:
+        st.toast(st.session_state.settings_toast)
+        st.session_state.settings_toast = None
 
     st.sidebar.markdown("## ⚙️ Notebook Settings")
     st.sidebar.markdown(
-        "Configure parameters for this notebook. Changes are saved only when you click Apply Settings."
+        'Configure parameters for this notebook. Changes are saved only when you click "Apply Settings".'
     )
 
-    with st.sidebar.form(key=form_key):
+    with st.sidebar.container():
         st.markdown("### LLM Configuration")
         new_model = st.selectbox(
             "Model Name",
+            key=f"model{k_suf}",
             options=models,
             index=(
                 models.index(settings["llm_model_name"])
@@ -1621,6 +1630,7 @@ def render_notebook_settings_sidebar(notebook_id: str):
 
         new_temp = st.slider(
             "Temperature",
+            key=f"temp{k_suf}",
             min_value=cfg.LLM_TEMPERATURE_MIN,
             max_value=cfg.LLM_TEMPERATURE_MAX,
             step=cfg.LLM_TEMPERATURE_STEP,
@@ -1630,6 +1640,7 @@ def render_notebook_settings_sidebar(notebook_id: str):
 
         new_num_ctx = st.number_input(
             "Context Window (num_ctx)",
+            key=f"ctx{k_suf}",
             min_value=cfg.LLM_NUM_CTX_MIN,
             max_value=cfg.LLM_NUM_CTX_MAX,
             step=cfg.LLM_NUM_CTX_STEP,
@@ -1638,18 +1649,20 @@ def render_notebook_settings_sidebar(notebook_id: str):
             help=cfg.LLM_NUM_CTX_HELP_MSG,
         )
 
-        st.markdown("### System Prompt (Optional)")
-        new_sys_prompt = st.text_area(
-            "System Prompt Override",
-            value=settings.get("sys_prompt_override", "") or "",
+        st.markdown("### Personal Context (Optional)")
+        new_personal_ctx = st.text_area(
+            "Personal Background & Instructions",
+            key=f"pctx{k_suf}",
+            value=settings.get("personal_ctx", "") or "",
             height=150,
-            placeholder=cfg.SYS_PROMPT_PLACEHOLDER,
-            help=cfg.SYS_PROMPT_HELP_MSG,
+            placeholder=cfg.PERSONAL_CTX_PLACEHOLDER,
+            help=cfg.PERSONAL_CTX_HELP_MSG,
         )
 
         st.markdown("### RAG & Retrieval")
         new_k = st.number_input(
             "Retrieval K",
+            key=f"k{k_suf}",
             min_value=cfg.RAG_RETRIEVAL_K_MIN,
             max_value=cfg.RAG_RETRIEVAL_K_MAX,
             step=cfg.RAG_RETRIEVAL_K_STEP,
@@ -1660,6 +1673,7 @@ def render_notebook_settings_sidebar(notebook_id: str):
 
         new_threshold = st.slider(
             "Score Threshold",
+            key=f"thresh{k_suf}",
             min_value=cfg.RAG_RETRIEVAL_SCORE_THRESHOLD_MIN,
             max_value=cfg.RAG_RETRIEVAL_SCORE_THRESHOLD_MAX,
             step=cfg.RAG_RETRIEVAL_SCORE_THRESHOLD_STEP,
@@ -1669,6 +1683,7 @@ def render_notebook_settings_sidebar(notebook_id: str):
 
         new_history = st.number_input(
             "Max Chat History",
+            key=f"hist{k_suf}",
             min_value=cfg.MAX_MSG_HISTORY_MIN,
             max_value=cfg.MAX_MSG_HISTORY_MAX,
             step=cfg.MAX_MSG_HISTORY_STEP,
@@ -1680,6 +1695,7 @@ def render_notebook_settings_sidebar(notebook_id: str):
         st.markdown("### Advanced Document Settings")
         new_chunk_len = st.number_input(
             "Max Chunk Length",
+            key=f"clen{k_suf}",
             min_value=cfg.RAG_MAX_CHUNK_LEN_MIN,
             max_value=cfg.RAG_MAX_CHUNK_LEN_MAX,
             step=cfg.RAG_MAX_CHUNK_LEN_STEP,
@@ -1689,6 +1705,7 @@ def render_notebook_settings_sidebar(notebook_id: str):
         )
         new_chunk_ovl = st.number_input(
             "Chunk Overlap",
+            key=f"covl{k_suf}",
             min_value=cfg.RAG_CHUNK_OVERLAP_MIN,
             max_value=cfg.RAG_CHUNK_OVERLAP_MAX,
             step=cfg.RAG_CHUNK_OVERLAP_STEP,
@@ -1698,6 +1715,7 @@ def render_notebook_settings_sidebar(notebook_id: str):
         )
         new_min_res = st.number_input(
             "Min Match Results (Fallback)",
+            key=f"mres{k_suf}",
             min_value=cfg.RAG_RETRIEVAL_MIN_RESULTS_MIN,
             max_value=cfg.RAG_RETRIEVAL_MIN_RESULTS_MAX,
             step=cfg.RAG_RETRIEVAL_MIN_RESULTS_STEP,
@@ -1707,6 +1725,7 @@ def render_notebook_settings_sidebar(notebook_id: str):
         )
         new_max_ctx = st.number_input(
             "RAG Max Context Length",
+            key=f"mctx{k_suf}",
             min_value=cfg.RAG_MAX_CTX_LEN_MIN,
             max_value=cfg.RAG_MAX_CTX_LEN_MAX,
             step=cfg.RAG_MAX_CTX_LEN_STEP,
@@ -1715,19 +1734,88 @@ def render_notebook_settings_sidebar(notebook_id: str):
             help=cfg.RAG_MAX_CTX_LEN_HELP_MSG,
         )
 
-        estimated_usage = (int(new_k) * 1000) + (int(new_history) * 200) + 500
+        is_safe = True
+
+        # A. Hardware & Memory Capacity Warnings:
+        is_heavy_model = (
+            "70b" in str(new_model).lower() or "32b" in str(new_model).lower()
+        )
+        if is_heavy_model and hw_info["vram_gb"] < 24.0:
+            st.error(
+                f"⚠️ Hardware Mismatch: Your GPU has {hw_info['vram_gb']}GB VRAM. Models 32B+ typically require >24GB. Expect severe lag or Out-Of-Memory crashes."
+            )
+            is_safe = False
+
+        if new_num_ctx > 8192 and (
+            hw_info["ram_gb"] < 16.0 or hw_info["vram_gb"] < 8.0
+        ):
+            st.warning(
+                f"⚠️ Memory Warning: A context window of {int(new_num_ctx)} consumes significant RAM/VRAM. You may experience crashes on your current hardware."
+            )
+            is_safe = False
+
+        estimated_usage = (int(new_k) * new_chunk_len) + (int(new_history) * 200) + 500
         if estimated_usage > int(new_num_ctx):
             st.warning(
-                f"⚠️ Memory Bottleneck: Estimated usage ({estimated_usage}) exceeds Context Window ({int(new_num_ctx)}). Consider increasing Context Window or lowering Retrieval K and Chat History."
+                "⚠️ Context Bottleneck: Your Retrieval K and Chat History generate more text than your Context Window can hold. The AI will 'forget' older document chunks or chat history."
+            )
+            is_safe = False
+
+        # B. Retrieval & RAG Quality Warnings:
+        if new_threshold < 1.0:
+            st.warning(
+                f"⚠️ High Strictness: A threshold of {float(new_threshold):.2f} is very strict. The AI may frequently say 'I cannot find the answer' even if related text exists."
+            )
+            is_safe = False
+        elif new_threshold > 1.5:
+            st.warning(
+                f"⚠️ Low Strictness: A threshold of {float(new_threshold):.2f} is very loose. The AI may retrieve irrelevant noise and hallucinate."
+            )
+            is_safe = False
+
+        if new_min_res > new_k:
+            st.error(
+                f"⚠️ Logic Error: Minimum results ({int(new_min_res)}) cannot be greater than the maximum chunks fetched (Retrieval K: {int(new_k)})."
+            )
+            is_safe = False
+
+        # C. Chunking Configuration Warnings:
+        if new_chunk_ovl >= new_chunk_len:
+            st.error(
+                f"⚠️ Chunking Error: Overlap ({int(new_chunk_ovl)}) must be strictly less than the Max Chunk Length ({int(new_chunk_len)}) to prevent infinite loops during PDF processing."
+            )
+            is_safe = False
+
+        if new_chunk_len > new_max_ctx:
+            st.warning(
+                f"⚠️ Embedding Truncation: Max Chunk Length ({int(new_chunk_len)}) exceeds the Embedding Context Limit ({int(new_max_ctx)}). The ends of your document chunks will be truncated and lost during embedding."
+            )
+            is_safe = False
+
+        # D. LLM Behavior Warnings:
+        if new_temp > 0.7:
+            st.info(
+                f"💡 High Creativity: A temperature of {float(new_temp):.1f} makes the AI creative but increases the risk of inventing facts (hallucinations) outside the documents."
+            )
+            is_safe = False
+
+        if len(new_personal_ctx) > 1000:
+            st.info(
+                "💡 Long Context: Your personal context is quite long. This is safely injected into the system prompt, but remember that it consumes part of your available Context Window."
+            )
+            is_safe = False
+
+        # E. Safe States:
+        if is_safe:
+            st.success(
+                "🤗 System configurations are mathematically sound and optimal for your current hardware."
             )
 
         col_reset, col_apply = st.columns(2)
         with col_reset:
-            reset_clicked = st.form_submit_button(
-                "Reset to Default", use_container_width=True
-            )
+            reset_clicked = st.button("Reset to Default", use_container_width=True)
         with col_apply:
-            apply_clicked = st.form_submit_button(
+            apply_clicked = st.button(
                 "Apply Settings", type="primary", use_container_width=True
             )
 
@@ -1736,8 +1824,10 @@ def render_notebook_settings_sidebar(notebook_id: str):
             is_deleted = db_middleware.delete_notebook_settings(notebook_id)
         if is_deleted:
             st.session_state.rag_chain = None
-            st.toast("Settings reset to defaults")
-            st.rerun()
+
+        st.session_state[rev_key] += 1
+        st.session_state.settings_toast = "Settings reset to defaults"
+        st.rerun()
 
     if apply_clicked:
         updated_settings: Dict[str, Any] = {
@@ -1751,35 +1841,23 @@ def render_notebook_settings_sidebar(notebook_id: str):
             "rag_chunk_overlap": int(new_chunk_ovl),
             "rag_retrieval_min_results": int(new_min_res),
             "rag_max_ctx_len": int(new_max_ctx),
-            "sys_prompt_override": (
-                str(new_sys_prompt).strip() if new_sys_prompt else ""
+            "personal_ctx": (
+                str(new_personal_ctx).strip() if new_personal_ctx else None
             ),
         }
 
-        settings_from_db = db_middleware.get_notebook_settings(notebook_id)
+        # Check if settings actually changed
+        for k, v in updated_settings.items():
+            if k not in settings or settings[k] != v:
+                with st.spinner("Applying settings..."):
+                    db_middleware.upsert_notebook_settings(
+                        notebook_id, updated_settings
+                    )
+                st.session_state.rag_chain = None
+                break
 
-        # Check if settings actually changed compared to DB (if it exists)
-        is_changed = True
-        if settings_from_db:
-            is_changed = False
-            for k, v in updated_settings.items():
-                if k not in settings_from_db or settings_from_db[k] != v:
-                    is_changed = True
-                    break
-        else:
-            # If no DB entry exists, compare with defaults to see if they just hit save without changes
-            is_changed = False
-            for k, v in updated_settings.items():
-                if k not in defaults or defaults[k] != v:
-                    is_changed = True
-                    break
-
-        if is_changed:
-            with st.spinner("Applying settings..."):
-                db_middleware.upsert_notebook_settings(notebook_id, updated_settings)
-            st.session_state.rag_chain = None
-            st.toast("Settings saved successfully")
-            st.rerun()
+        st.session_state.settings_toast = "Settings saved successfully"
+        st.rerun()
 
 
 @st.dialog("Rename Notebook")
@@ -1931,7 +2009,9 @@ def confirm_delete_source_dialog(
             use_container_width=True,
         ):
             with st.spinner(f"Removing {file_name}..."):
-                logger.info(f"🗑️\tRemoving document: {file_name}")
+                if print_debug:
+                    logger.info(f"🗑️\tRemoving document: {file_name}")
+
                 if db_middleware.delete_source(source_id):
                     source_dir = get_source_vectorstore_dir(notebook_id, source_id)
                     if source_dir.exists():

@@ -248,8 +248,10 @@ RAG_RETRIEVAL_K: int = 8
 RAG_RETRIEVAL_MIN_RESULTS: int = 1
 
 # Euclidean Distance (L2): similarity score threshold for quality filtering (FAISS distance: lower = better match)
-# Typical range: 5.0-15.0. Lower = stricter filtering (fewer chunks but higher quality)
-RAG_RETRIEVAL_SCORE_THRESHOLD: float = 15.0
+# 0.5-1.0 = Strict filtering (only highest quality matches)
+# 1.0-1.5 = Moderate filtering (balanced quality/quantity)
+# 1.5-2.0 = Loose filtering (include more results even if less relevant)
+RAG_RETRIEVAL_SCORE_THRESHOLD: float = 1.5
 
 # Max length per chunk in characters (prevents extremely long single chunks)
 RAG_MAX_CHUNK_LEN: int = 1000
@@ -351,7 +353,7 @@ RAG_RETRIEVAL_MIN_RESULTS_HELP_MSG = "Minimum number of retrieved chunks to use 
 
 # Retrieval score threshold
 RAG_RETRIEVAL_SCORE_THRESHOLD_MIN: float = 0.0
-RAG_RETRIEVAL_SCORE_THRESHOLD_MAX: float = 15.0
+RAG_RETRIEVAL_SCORE_THRESHOLD_MAX: float = 2.0
 RAG_RETRIEVAL_SCORE_THRESHOLD_STEP: float = 0.05
 RAG_RETRIEVAL_SCORE_THRESHOLD_HELP_MSG: str = "Similarity score threshold for filtering retrieved chunks (lower = stricter). Adjust based on your documents and embedding model for best results."
 
@@ -395,5 +397,5 @@ LLM_TEMPERATURE_STEP: float = 0.05
 LLM_TEMPERATURE_HELP_MSG: str = "Controls creativity. Range 0.1 - 0.3 is best for factual research and citations. 0.7-0.9 is better for brainstorming and creative summaries."
 
 # System Prompt Override
-SYS_PROMPT_HELP_MSG: str = "Custom instructions to guide the AI's behavior and personality. Leave empty to use the default prompt."
-SYS_PROMPT_PLACEHOLDER: str = "You are a helpful, respectful, and honest assistant..."
+PERSONAL_CTX_HELP_MSG: str = "Custom instructions or your personal background to guide the AI's behavior and personality."
+PERSONAL_CTX_PLACEHOLDER: str = "E.g., I am a high school biology teacher..."

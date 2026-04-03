@@ -23,8 +23,49 @@ import re
 from langdetect import (  # pyright: ignore[reportMissingTypeStubs]
     detect,  # pyright: ignore[reportUnknownVariableType]
 )
+import psutil
+import platform
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# HARDWARE DETECTION UTILITY
+# ============================================================================
+
+
+@st.cache_data(show_spinner=False)
+def get_system_hardware_info() -> Dict[str, Any]:
+    """Gather system hardware capabilities for dynamic UI warnings."""
+    # OS & CPU & RAM
+    os_name = platform.system()
+    cpu_cores = psutil.cpu_count(logical=True)
+    total_ram_gb = round(psutil.virtual_memory().total / (1024**3), 1)
+
+    # GPU
+    gpu_name = "None/Integrated"
+    total_vram_gb = 0.0
+
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            gpu_name = torch.cuda.get_device_name(0)
+            # torch limits might not reflect exact system VRAM,
+            # but usually get_device_properties gives total_memory in bytes
+            props: Any = torch.cuda.get_device_properties(0)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+            total_memory_bytes: int = getattr(props, "total_memory", 0)  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]
+            total_vram_gb = round(total_memory_bytes / (1024**3), 1)
+    except Exception as e:
+        logger.debug(f"Failed to detect GPU via torch: {e}")
+
+    return {
+        "os": os_name,
+        "cpu_cores": cpu_cores,
+        "ram_gb": total_ram_gb,
+        "gpu_name": gpu_name,
+        "vram_gb": total_vram_gb,
+    }
 
 
 def get_default_notebook_settings() -> Dict[str, Any]:
@@ -39,7 +80,7 @@ def get_default_notebook_settings() -> Dict[str, Any]:
         "llm_model_name": cfg.LLM_MODEL_NAME,
         "llm_num_ctx": cfg.LLM_NUM_CTX,
         "llm_temp": cfg.LLM_TEMPERATURE,
-        "sys_prompt_override": None,
+        "personal_ctx": None,
     }
 
 
@@ -67,7 +108,7 @@ def _load_notebook_settings(
         "llm_model_name": settings.get("llm_model_name"),
         "llm_num_ctx": settings.get("llm_num_ctx"),
         "llm_temp": settings.get("llm_temp"),
-        "sys_prompt_override": settings.get("sys_prompt_override"),
+        "personal_ctx": settings.get("personal_ctx"),
     }
 
 
@@ -1036,7 +1077,7 @@ def create_history_aware_rag_chain(
     )
 
     # Step 5: Create enhanced prompt template with time and general knowledge permission
-    custom_instructions = settings.get("sys_prompt_override", None)
+    custom_instructions = settings.get("personal_ctx", None)
     sys_prompt_raw: str = cfg.get_sys_prompt(
         custom_instructions=str(custom_instructions) if custom_instructions else None
     )

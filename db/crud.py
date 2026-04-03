@@ -358,7 +358,7 @@ def upsert_notebook_settings(notebook_id: str, settings: Dict[str, Any]) -> None
                 id, notebook_id, rag_retrieval_k, rag_retrieval_min_results,
                 rag_retrieval_score_threshold, rag_max_chunk_len,
                 rag_chunk_overlap, rag_max_ctx_len, max_msg_history,
-                llm_model_name, llm_num_ctx, llm_temp, sys_prompt_override,
+                llm_model_name, llm_num_ctx, llm_temp, personal_ctx,
                 updated_at
             ) VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP
@@ -373,7 +373,7 @@ def upsert_notebook_settings(notebook_id: str, settings: Dict[str, Any]) -> None
                 llm_model_name=excluded.llm_model_name,
                 llm_num_ctx=excluded.llm_num_ctx,
                 llm_temp=excluded.llm_temp,
-                sys_prompt_override=excluded.sys_prompt_override,
+                personal_ctx=excluded.personal_ctx,
                 updated_at=CURRENT_TIMESTAMP;
             """,
             (
@@ -389,7 +389,7 @@ def upsert_notebook_settings(notebook_id: str, settings: Dict[str, Any]) -> None
                 settings.get("llm_model_name"),
                 settings.get("llm_num_ctx"),
                 settings.get("llm_temp"),
-                settings.get("sys_prompt_override"),
+                settings.get("personal_ctx"),
             ),
         )
         conn.commit()

@@ -84,7 +84,7 @@ def init_db(db_name: str = cfg.DB_ROOT_PATH, print_debug: bool = False) -> None:
             llm_model_name VARCHAR(255) DEFAULT '{cfg.LLM_MODEL_NAME}',
             llm_num_ctx INTEGER DEFAULT {cfg.LLM_NUM_CTX},
             llm_temp REAL DEFAULT {cfg.LLM_TEMPERATURE},
-            sys_prompt_override TEXT,
+            personal_ctx TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (notebook_id) REFERENCES notebooks (id) ON DELETE CASCADE
