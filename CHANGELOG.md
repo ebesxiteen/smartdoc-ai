@@ -13,9 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Word Document Support**: Upload and process `.docx` files alongside PDFs.
 - **Answer Generation Resume**: Auto-resume answer generation if the process is interrupted (e.g., if the user accidentally refreshes the page or unselects all resources during generation).
+- **Confirm Dialog For Deletions**: Added confirmation dialogs for all deletion actions (notebooks, sources, notes, chat history) to prevent accidental data loss.
+- **Notebook Settings Feature**: Implemented a settings panel for each notebook allowing users to configure parameters like embedding model, FAISS K value, and summary generation strategy on a per-notebook basis.
 
 ### Changed
 
+- **RAG Pipeline Conversational Memory**: Rebuilt the LangChain pipeline to natively ingest `chat_message_history`, allowing the LLM to understand contextual follow-up questions while cleanly bypassing FAISS retrieval for standard greetings.
+- **Configuration Refactoring**: Renamed global configuration variables in `configs.py` for better consistency and readability (e.g., `RAG_MAX_CONTEXT_LENGTH` to `RAG_MAX_CTX_LEN`) and globalized the number of first chunks used for summaries and suggested questions.
+- **System & Generation Prompts Optimization**: Modified the base system prompt to enhance LLM performance and globalized the prompts for 'summary' and 'suggested questions'.
+- **App & Database Performance**: Optimized startup and runtime performance by deferring heavy module loads using local imports, and optimized SQLite delete operations for lower latency.
+- **Codebase Clean-up**: Removed redundant code in `utils.py` and `app.py` related to chat history management and prompt construction.
 - **Suggested Questions UI**: Improved display of `source.suggested_questions` by randomly picking up to 3 questions across all available resources rather than just the first resource.
 - **Summary Generation Strategy**: Modified the `source.summary` generation process to use a more efficient "Top-K Slicing" method instead of semantic search, improving summary relevance.
 - **UI Processing Uploaded Sources Enhancement**: Use progress bar loading while processing uploaded sources to improve user experience and provide feedback on long-running operations.
@@ -26,6 +33,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Input Text Truncation Handling**: Prevented silent truncation of user input before saving to the database by throwing an explicit error when limits are exceeded. Ensured LLM-generated fields like `source.summary` and `source.suggested_questions` are not restricted by truncation, preserving data integrity.
 - **Middle Floating `Add Note` Button**: Repositioned the "Add Note" button to a fixed position at the bottom center of the section to improve visibility and accessibility, especially when there are no existing notes.
 - **Unattended Suggested Questions Truncation Display**: Remove auto truncated display of suggested questions and always show full questions in the UI, ensuring users can see all generated suggestions without confusion.
+- **Unnecessary Retrieval Process During Greetings**: Prevented the system from invoking the "Retrieval Process" to find relevant chunks when the user's input is detected as a greeting (e.g., "Hello", "Hi"), which caused unnecessary processing and delayed response times. Implemented a check to bypass retrieval and directly generate a greeting response in such cases.
+- **LLM Empty Response Handling**: Added a fallback answer for cases when the LLM generates an empty response after tag removal, ensuring users receive a meaningful message instead of an empty response and preventing database insertion errors.
+- **Robust Tag Removal**: Implemented robust regex-based tag removal to ensure that any tags like `[STATUS: DOC_ANSWER]` are completely removed from the LLM's response before being displayed to users, preventing confusion and improving the clarity of answers.
 
 ## [1.0.0] - 2026-03-25
 

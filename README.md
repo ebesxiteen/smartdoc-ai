@@ -6,6 +6,7 @@
 
 ## 🌟 Features
 
+- **⚙️ Notebook Settings**: Customize memory, retrieval count, score thresholds, and prompts independently per notebook natively via UI.
 - **📚 Document Hub**: Upload and manage multiple PDF and Word documents in organized notebooks
 - **🔍 Semantic Search**: Intelligently retrieve the most relevant document sections using FAISS vector embeddings
 - **🤖 Grounded AI Responses**: Get answers strictly based on your documents with automatic source citations
@@ -82,6 +83,12 @@ The app will open at `http://localhost:8501`.
 2. Enter a notebook name (e.g., "Machine Learning Research")
 3. Optionally add a description
 
+### Customizing Notebook Settings (⚙️ New)
+
+1. Select a notebook and open the **Notebook Settings** panel in the sidebar
+2. Adjust retrieved chunk count, conversation memory, temperature, or add special System Prompts for this specific notebook
+3. Click **"Apply Settings"** to securely persist your configuration
+
 ### Uploading Documents
 
 1. Select a notebook from the dashboard
@@ -114,12 +121,12 @@ All tunable parameters are centralized in [core/configs.py](./core/configs.py):
 
 ```python
 # RAG Tuning (adjust for inference quality vs speed)
-RAG_RETRIEVAL_K = 4              # Top K chunks to retrieve
-RAG_RETRIEVAL_SCORE_THRESHOLD = 15.0  # Lower = stricter filtering
-RAG_MAX_CONTEXT_LENGTH = 3000    # Characters sent to LLM
+RAG_RETRIEVAL_K: int = 8         # Top K chunks to retrieve
+RAG_RETRIEVAL_SCORE_THRESHOLD: float = 15.0  # Lower = stricter filtering
+RAG_MAX_CTX_LEN: int = RAG_RETRIEVAL_K * 1000 # Characters sent to LLM
 
 # LLM Setup
-LLM_BASE_URL = "http://localhost:11434"  # Ollama server
+OLLAMA_BASE_URL = "http://localhost:11434"  # Ollama server
 LLM_MODEL_NAME = "qwen2.5:7b"
 LLM_TEMPERATURE = 0.7            # 0 = deterministic, 1 = creative
 
