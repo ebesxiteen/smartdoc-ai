@@ -19,6 +19,8 @@ from langchain_core.documents import Document
 
 import core.configs as cfg
 from core.utils import (
+    debug_log,
+    print_breaker,
     get_default_notebook_settings,
     hash_file_content,
     check_file_already_exists_in_notebook,
@@ -313,7 +315,16 @@ def load_workspace(notebook_id: str, print_debug: bool = False):
     st.session_state.pending_new_uploads = {}
 
 
-def check_ollama_connection():
+def check_ollama_connection() -> bool:
+    """
+    Check if Ollama LLM server is running and accessible.
+
+    Attempts to connect to the Ollama API server at the configured base URL.
+    This is called during initialization to set ollama_ready status.
+
+    Returns:
+        bool: True if Ollama server is online and responding, False otherwise.
+    """
     import requests
 
     try:
@@ -322,7 +333,7 @@ def check_ollama_connection():
             return True
         return False
     except Exception as e:
-        logger.error(f"Ollama connection failed: {str(e)}")
+        debug_log("ERROR", message=f"Ollama connection failed: {str(e)}")
         return False
 
 
@@ -333,10 +344,7 @@ def initialize_session_state():
 
     if "current_notebook_id" not in st.session_state:
         st.session_state.current_notebook_id = None
-        print(
-            "♻️\tRESET NOTEBOOK ID AT LINE",
-            __import__("inspect").currentframe().f_lineno,
-        )
+        debug_log("DEBUG", message="Reset notebook ID on first load")
 
     if "ollama_ready" not in st.session_state:
         st.session_state.ollama_ready = check_ollama_connection()
@@ -355,7 +363,19 @@ def initialize_session_state():
 
 
 def generate_summary(chunks: List[Document], notebook_id: str) -> str:
-    """Generate a brief summary of the document using Top-K Slicing."""
+    """
+    Generate a brief summary of the document using Top-K slicing strategy.
+
+    Extracts the top K chunks from a document and prompts the LLM to generate
+    a concise summary. Used during document upload for quick overview.
+
+    Args:
+        chunks: List of Document objects (from PDF extraction/chunking).
+        notebook_id: UUID of the notebook this summary belongs to.
+
+    Returns:
+        str: Generated summary text, or error message if generation fails.
+    """
     from langchain_ollama import OllamaLLM
 
     try:
@@ -381,12 +401,25 @@ def generate_summary(chunks: List[Document], notebook_id: str) -> str:
 
         return summary.strip()
     except Exception as e:
-        logger.error(f"Summary generation failed: {str(e)}")
+        debug_log("ERROR", message=f"Summary generation failed: {str(e)}")
         return "Unable to generate summary."
 
 
 def generate_suggested_questions(chunks: List[Document], notebook_id: str) -> List[str]:
-    """Generate 3 suggested questions based on the Top-K chunks of the document."""
+    """
+    Generate suggested questions based on document content.
+
+    Extracts the top K chunks from a document and prompts the LLM to generate
+    3-4 relevant questions that a user might ask about the document. Displayed
+    in the UI for quick reference during onboarding.
+
+    Args:
+        chunks: List of Document objects (from PDF extraction/chunking).
+        notebook_id: UUID of the notebook this belongs to.
+
+    Returns:
+        List[str]: List of suggested questions (max 4), or empty list if generation fails.
+    """
     from langchain_ollama import OllamaLLM
 
     try:
@@ -419,7 +452,7 @@ def generate_suggested_questions(chunks: List[Document], notebook_id: str) -> Li
 
         return questions[:4]
     except Exception as e:
-        logger.error(f"Question generation failed: {str(e)}")
+        debug_log("ERROR", message=f"Question generation failed: {str(e)}")
         return []
 
 
@@ -429,7 +462,25 @@ def process_file(
     print_debug: bool = False,
     progress_callback: Optional[Callable[[str], None]] = None,
 ) -> bool:
-    """Process a PDF: extract, chunk, embed, merge with existing data."""
+    """
+    Process uploaded document: extract, chunk, embed, and integrate with vectorstore.
+
+    Orchestrates the complete ingestion pipeline: file type detection, chunking,
+    embedding, vectorstore creation, summary/question generation, and database
+    persistence. Handles errors gracefully and provides progress updates.
+
+    Args:
+        uploaded_file: Streamlit UploadedFile or bytes object containing document.
+        filename: Display name for the document.
+        print_debug: If True, emit structured debug logs throughout the process.
+        progress_callback: Optional callback function for progress updates (used in UI).
+
+    Returns:
+        bool: True if processing succeeded, False if error occurred or duplicate detected.
+
+    Raises:
+        Does not raise; errors are caught and reported via st.error() and logs.
+    """
     import tempfile
     from core.utils import (
         detect_file_type,
@@ -506,7 +557,7 @@ def process_file(
 
             # Embed with GPU/CPU fallback
             if print_debug:
-                logger.info(f"🛠️\tCreating embeddings for {num_chunks} chunks")
+                debug_log("EMBED", message=f"Creating embeddings for {num_chunks} chunks")
             if progress_callback:
                 progress_callback("Loading embedding model...")
             embeddings = try_load_embeddings()
@@ -550,12 +601,14 @@ def process_file(
 
             # Generate summary
             if print_debug:
-                logger.info(f"🚀\tGenerating summary for {filename}")
+                debug_log("PROCESS_START", message=f"Generating summary for {filename}")
             summary = generate_summary(chunks, notebook_id=notebook_id)
 
             # Generate suggested questions
             if print_debug:
-                logger.info(f"🚀\tGenerating suggested questions for {filename}")
+                debug_log(
+                    "PROCESS_START", message=f"Generating suggested questions for {filename}"
+                )
             suggested_questions = generate_suggested_questions(
                 chunks, notebook_id=notebook_id
             )
@@ -600,14 +653,14 @@ def process_file(
             )
 
             if print_debug:
-                logger.info(f'✨\tSuccessfully processed "{filename}"')
+                debug_log("SUCCESS", message=f'Document upload completed: "{filename}"')
 
         st.success(f'✨ Successfully loaded "{filename}"')
 
         return True
 
     except Exception as e:
-        logger.error(f'Error processing "{filename}": {str(e)}')
+        debug_log("ERROR", message=f'Document processing failed: {filename} - {str(e)}')
         st.error(f"Error processing file: {str(e)}")
         return False
 
@@ -623,13 +676,31 @@ def process_file(
 # ============================================================================
 # SIDEBAR: SOURCE HUB
 # ============================================================================
-def go_back_to_notebooks():
+def go_back_to_notebooks() -> None:
+    """
+    Reset session state to return to notebooks dashboard.
+
+    Called when user clicks "Back" button in notebook workspace. Clears
+    the current notebook ID to show the main dashboard UI.
+    """
     st.session_state.current_notebook_id = None
-    print("♻️\tRESET NOTEBOOK ID AT LINE", __import__("inspect").currentframe().f_lineno)
+    debug_log("DEBUG", message="Returned to notebooks dashboard")
 
 
-def source_hub_ui(print_debug: bool = False):
-    """The 'Source Hub' for document management."""
+def source_hub_ui(print_debug: bool = False) -> None:
+    """
+    Render the Source Hub sidebar for document management.
+
+    Displays and manages uploaded documents (sources) including:
+    - File upload interface with progress feedback
+    - List of uploaded sources with metadata
+    - Rename, delete, view functionality for each source
+    - Source selection checkboxes for search filtering
+    - Hardware information display
+
+    Args:
+        print_debug: If True, emit debug logs during operations.
+    """
     from core.utils import get_system_hardware_info
 
     hw_info = get_system_hardware_info()
@@ -1131,8 +1202,16 @@ def source_hub_ui(print_debug: bool = False):
 # ============================================================================
 # MAIN CHAT INTERFACE
 # ============================================================================
-def render_user_message(content: str):
-    """Renders a chat message from the user aligned to the right."""
+def render_user_message(content: str) -> None:
+    """
+    Render a user message in the chat interface.
+
+    Displays user-sent messages with right alignment and distinct styling
+    to differentiate from AI assistant responses.
+
+    Args:
+        content: The user's message text to display.
+    """
     escaped_content = html.escape(content).replace("\n", "<br>")
     st.markdown(
         f"""
@@ -1146,8 +1225,18 @@ def render_user_message(content: str):
     )
 
 
-def chat_interface(notebook_name: str, print_debug: bool = False):
-    """Main chat area - NotebookLM style."""
+def chat_interface(notebook_name: str, print_debug: bool = False) -> None:
+    """
+    Render the main chat interface for querying documents.
+
+    Displays the chat history area, chat input field, and processes user queries.
+    Integrates with the RAG chain to retrieve relevant document chunks and
+    generate answers with citations. Handles document selection and chat history.
+
+    Args:
+        notebook_name: Display name of the current notebook.
+        print_debug: If True, emit debug logs during query processing.
+    """
     st.markdown(
         '<div class="chat-section-bg" style="display:none"></div>',
         unsafe_allow_html=True,
@@ -1331,11 +1420,13 @@ def chat_interface(notebook_name: str, print_debug: bool = False):
                     try:
                         # Get answer and sources via RAG chain with chat history context
                         if print_debug:
-                            logger.info(f"🔡\tProcessing query: {query_to_answer}")
+                            print_breaker()
+                            debug_log(
+                                "INFO", "🔡", f"Processing query: {query_to_answer}"
+                            )
 
                             # Log selected sources
-                            logger.info("   " + "━" * 60)
-                            logger.info("   📚\tSelected Sources for this Query:")
+                            debug_log("INFO", "📚", "Selected sources for this query:")
                             all_sources = db_middleware.get_sources_for_notebook(
                                 st.session_state.current_notebook_id
                             )
@@ -1346,12 +1437,14 @@ def chat_interface(notebook_name: str, print_debug: bool = False):
                             ]
                             if selected_names:
                                 for name in selected_names:
-                                    logger.info(f"      • {name}")
+                                    debug_log("INFO", "📄", f"• {name}")
                             else:
-                                logger.info(
-                                    "      (No sources selected / General Knowledge)"
+                                debug_log(
+                                    "INFO",
+                                    "📄",
+                                    "No sources selected - using general knowledge",
                                 )
-                            logger.info("   " + "━" * 60)
+                            print_breaker()
 
                         # Exclude the current query from the chat history passed for context!
                         history_context = st.session_state.chat_history[:-1]
@@ -1400,7 +1493,11 @@ def chat_interface(notebook_name: str, print_debug: bool = False):
 
                     except Exception as e:
                         error_msg = str(e)
-                        logger.error(f"Error: {error_msg}")
+                        debug_log(
+                            "ERROR",
+                            "❌",
+                            f"Error during answer generation: {error_msg}",
+                        )
 
                         # Check for CUDA/memory-related errors
                         if (
@@ -1443,7 +1540,13 @@ def chat_interface(notebook_name: str, print_debug: bool = False):
 # NOTES PANEL
 # ============================================================================
 @st.dialog("New Note")
-def create_note_modal():
+def create_note_modal() -> None:
+    """
+    Modal dialog to create a new saved note.
+
+    Prompts user for note title and content, validates input,
+    and saves to the database.
+    """
     title = st.text_input("Title", placeholder="Note title...")
     content = st.text_area("Content", placeholder="Write your note here...", height=200)
     col1, col2 = st.columns(2)
@@ -1466,7 +1569,15 @@ def create_note_modal():
 
 
 @st.dialog("Edit Note")
-def edit_note_modal(note_id: str, current_title: str, current_content: str):
+def edit_note_modal(note_id: str, current_title: str, current_content: str) -> None:
+    """
+    Modal dialog to edit an existing saved note.
+
+    Args:
+        note_id: UUID of the note to edit.
+        current_title: Current note title (displayed as default).
+        current_content: Current note content (displayed as default).
+    """
     title = st.text_input("Title", value=current_title)
     content = st.text_area("Content", value=current_content or "", height=200)
     col1, col2 = st.columns(2)
@@ -1492,8 +1603,14 @@ def edit_note_modal(note_id: str, current_title: str, current_content: str):
             st.error(str(e))
 
 
-def notes_panel_ui():
-    """Dedicated Notes panel — lists all notes, supports add/edit/delete."""
+def notes_panel_ui() -> None:
+    """
+    Render the Notes panel for saving and organizing study notes.
+
+    Displays saved notes from the notebook, with functionality to create,
+    edit, and delete notes. Notes are persisted in the database and can be
+    exported or used to build study guides.
+    """
     from core.utils import format_relative_time
 
     st.markdown(
@@ -1545,7 +1662,16 @@ def notes_panel_ui():
         create_note_modal()
 
 
-def delete_notebook_callback(nb_id: str):
+def delete_notebook_callback(nb_id: str) -> None:
+    """
+    Callback to delete a notebook and its associated data.
+
+    Removes the notebook record from the database and cleans up the
+    associated vectorstore directory from disk.
+
+    Args:
+        nb_id: UUID of the notebook to delete.
+    """
     from core.utils import get_notebook_vectorstore_dir
 
     if db_middleware.delete_notebook(nb_id):
@@ -1558,7 +1684,13 @@ def delete_notebook_callback(nb_id: str):
 
 
 @st.dialog("Create New Notebook")
-def create_notebook_modal():
+def create_notebook_modal() -> None:
+    """
+    Modal dialog to create a new notebook.
+
+    Prompts user for notebook name and optional description, validates input,
+    and creates the notebook in the database.
+    """
     new_name = st.text_input(
         "Notebook Name", placeholder="e.g., Biology 101, Project Phoenix..."
     )
@@ -1577,7 +1709,22 @@ def create_notebook_modal():
                 st.error(f"❌ {str(e)}")
 
 
-def render_notebook_settings_sidebar(notebook_id: str):
+def render_notebook_settings_sidebar(notebook_id: str) -> None:
+    """
+    Render the notebook settings sidebar for RAG parameter tuning.
+
+    Displays configurable settings for:
+    - LLM parameters (model, temperature, context window)
+    - RAG parameters (retrieval K, score threshold, chunk size)
+    - Personal context / system instructions
+    - Retrieval strategy balance (semantic vs keyword)
+
+    Includes validation warnings for configuration conflicts and unsafe settings.
+    Settings are persisted to the database and applied to the current notebook.
+
+    Args:
+        notebook_id: UUID of the notebook to configure.
+    """
     from core.utils import get_installed_ollama_models, get_system_hardware_info
 
     hw_info = get_system_hardware_info()
@@ -1660,6 +1807,16 @@ def render_notebook_settings_sidebar(notebook_id: str):
         )
 
         st.markdown("### RAG & Retrieval")
+        new_weight_semantic = st.slider(
+            "Retrieval Strategy Balance",
+            key=f"weights{k_suf}",
+            min_value=cfg.WEIGHT_SEMANTIC_MIN,
+            max_value=cfg.WEIGHT_SEMANTIC_MAX,
+            step=cfg.WEIGHT_SEMANTIC_STEP,
+            value=float(settings.get("weight_semantic", cfg.WEIGHT_SEMANTIC)),
+            help=cfg.WEIGHT_SEMANTIC_HELP_MSG,
+        )
+
         new_k = st.number_input(
             "Retrieval K",
             key=f"k{k_suf}",
@@ -1762,12 +1919,12 @@ def render_notebook_settings_sidebar(notebook_id: str):
             is_safe = False
 
         # B. Retrieval & RAG Quality Warnings:
-        if new_threshold < 1.0:
+        if new_threshold < 10.0:
             st.warning(
                 f"⚠️ High Strictness: A threshold of {float(new_threshold):.2f} is very strict. The AI may frequently say 'I cannot find the answer' even if related text exists."
             )
             is_safe = False
-        elif new_threshold > 1.5:
+        elif new_threshold > 15.0:
             st.warning(
                 f"⚠️ Low Strictness: A threshold of {float(new_threshold):.2f} is very loose. The AI may retrieve irrelevant noise and hallucinate."
             )
@@ -1826,7 +1983,7 @@ def render_notebook_settings_sidebar(notebook_id: str):
             st.session_state.rag_chain = None
 
         st.session_state[rev_key] += 1
-        st.session_state.settings_toast = "Settings reset to defaults"
+        st.session_state.settings_toast = "🤗 Settings reset to defaults"
         st.rerun()
 
     if apply_clicked:
@@ -1844,6 +2001,8 @@ def render_notebook_settings_sidebar(notebook_id: str):
             "personal_ctx": (
                 str(new_personal_ctx).strip() if new_personal_ctx else None
             ),
+            "weight_semantic": float(new_weight_semantic),
+            "weight_bm25": 1.0 - float(new_weight_semantic),
         }
 
         # Check if settings actually changed
@@ -1856,15 +2015,22 @@ def render_notebook_settings_sidebar(notebook_id: str):
                 st.session_state.rag_chain = None
                 break
 
-        st.session_state.settings_toast = "Settings saved successfully"
+        st.session_state.settings_toast = "🤗 Settings saved successfully"
         st.rerun()
 
 
 @st.dialog("Rename Notebook")
 def rename_notebook_modal(
     notebook_id: str, current_name: str, current_description: Optional[str] = None
-):
-    """Modal dialog to rename a notebook."""
+) -> None:
+    """
+    Modal dialog to rename a notebook and update its description.
+
+    Args:
+        notebook_id: UUID of the notebook to rename.
+        current_name: Current notebook name (displayed as default).
+        current_description: Current description (if any).
+    """
     st.markdown("Edit notebook details:")
 
     new_name = st.text_input(
@@ -1907,12 +2073,18 @@ def rename_notebook_modal(
         except ValueError as e:
             st.error(f"❌ {str(e)}")
         except Exception as e:
-            logger.error(f"Error renaming notebook {notebook_id}: {str(e)}")
+            debug_log("ERROR", message=f"Error renaming notebook: {str(e)}")
             st.error(f"Error renaming notebook: {str(e)}")
 
 
-def rename_source_modal(source_id: str, current_name: str):
-    """Modal dialog to rename a source file."""
+def rename_source_modal(source_id: str, current_name: str) -> None:
+    """
+    Modal dialog to rename a source document.
+
+    Args:
+        source_id: UUID of the source to rename.
+        current_name: Current source filename.
+    """
     st.markdown("Rename source:")
 
     new_name = st.text_input(
@@ -1948,13 +2120,17 @@ def rename_source_modal(source_id: str, current_name: str):
         except ValueError as e:
             st.error(f"❌ {str(e)}")
         except Exception as e:
-            logger.error(f"Error renaming source {source_id}: {str(e)}")
+            debug_log("ERROR", message=f"Error renaming source: {str(e)}")
             st.error(f"Error renaming source: {str(e)}")
 
 
 @st.dialog("Rename Source", width="small")
-def show_rename_source_dialog():
-    """Display rename source modal dialog."""
+def show_rename_source_dialog() -> None:
+    """
+    Display the rename source modal dialog.
+
+    Wrapper that triggers the rename_source_modal() with session state data.
+    """
     if st.session_state.rename_source_id:
         rename_source_modal(
             st.session_state.rename_source_id, st.session_state.rename_source_name or ""
@@ -1967,8 +2143,14 @@ def show_rename_source_dialog():
 
 
 @st.dialog("Confirm Deletion", width="small")
-def confirm_delete_notebook_dialog(nb_id: str, nb_name: str):
-    """Dialog to confirm deletion of a notebook."""
+def confirm_delete_notebook_dialog(nb_id: str, nb_name: str) -> None:
+    """
+    Confirmation dialog for notebook deletion.
+
+    Args:
+        nb_id: UUID of the notebook to delete.
+        nb_name: Display name of the notebook (shown in warning message).
+    """
     st.warning(
         f"Are you sure you want to delete the notebook **{nb_name}**? This action cannot be undone."
     )
@@ -1990,8 +2172,18 @@ def confirm_delete_notebook_dialog(nb_id: str, nb_name: str):
 @st.dialog("Confirm Deletion", width="small")
 def confirm_delete_source_dialog(
     source_id: str, file_name: str, notebook_id: str, print_debug: bool
-):
-    """Dialog to confirm deletion of a source."""
+) -> None:
+    """
+    Confirmation dialog for source document deletion.
+
+    Removes source from database, deletes vectorstore files, and reloads RAG chain.
+
+    Args:
+        source_id: UUID of the source to delete.
+        file_name: Display name of the document.
+        notebook_id: UUID of the parent notebook (for vectorstore cleanup).
+        print_debug: If True, emit debug logs during deletion.
+    """
     st.warning(
         f"Are you sure you want to delete **{file_name}**? This action cannot be undone."
     )
@@ -2010,7 +2202,7 @@ def confirm_delete_source_dialog(
         ):
             with st.spinner(f"Removing {file_name}..."):
                 if print_debug:
-                    logger.info(f"🗑️\tRemoving document: {file_name}")
+                    debug_log("PROCESS_START", message=f"Deleting document: {file_name}")
 
                 if db_middleware.delete_source(source_id):
                     source_dir = get_source_vectorstore_dir(notebook_id, source_id)
@@ -2028,8 +2220,13 @@ def confirm_delete_source_dialog(
 
 
 @st.dialog("Confirm Deletion", width="small")
-def confirm_delete_chat_history_dialog(notebook_id: str):
-    """Dialog to confirm clearing chat history."""
+def confirm_delete_chat_history_dialog(notebook_id: str) -> None:
+    """
+    Confirmation dialog to clear all chat history for a notebook.
+
+    Args:
+        notebook_id: UUID of the notebook whose chat history should be deleted.
+    """
     st.warning(
         "Are you sure you want to delete all chat history for this notebook? This action cannot be undone."
     )
@@ -2051,8 +2248,14 @@ def confirm_delete_chat_history_dialog(notebook_id: str):
 
 
 @st.dialog("Confirm Deletion", width="small")
-def confirm_delete_note_dialog(note_id: str, notebook_id: str):
-    """Dialog to confirm deletion of a note."""
+def confirm_delete_note_dialog(note_id: str, notebook_id: str) -> None:
+    """
+    Confirmation dialog to delete a saved note.
+
+    Args:
+        note_id: UUID of the note to delete.
+        notebook_id: UUID of the parent notebook (for session state update).
+    """
     st.warning(
         "Are you sure you want to delete this note? This action cannot be undone."
     )
@@ -2079,8 +2282,16 @@ def confirm_delete_note_dialog(note_id: str, notebook_id: str):
 # ============================================================================
 # NOTEBOOK DASHBOARD
 # ============================================================================
-def render_dashboard():
-    """Renders the grid of notebooks to select or create."""
+def render_dashboard() -> None:
+    """
+    Render the main dashboard with notebook grid.
+
+    Displays all user notebooks in a 3-column grid layout with:
+    - Notebook name, description, creation date, source count
+    - Open button to load notebook workspace
+    - Edit/Delete options in dropdown menu
+    - Button to create new notebook
+    """
     header_col1, header_col2 = st.columns([4, 1], vertical_alignment="bottom")
     with header_col1:
         st.markdown(
@@ -2147,8 +2358,19 @@ def render_dashboard():
 # ============================================================================
 # MAIN APP
 # ============================================================================
-def main():
-    """Main application entry point."""
+def main() -> None:
+    """
+    Main application entry point and orchestrator.
+
+    Initializes session state, handles navigation between dashboard and
+    notebook workspaces, and renders the appropriate UI layout.
+
+    Flow:
+    1. Initialize session state on first app run
+    2. If loading notebook: show spinner and load workspace
+    3. If no notebook selected: render dashboard
+    4. If notebook selected: render workspace (sidebar + chat + notes)
+    """
     initialize_session_state()
 
     if (
@@ -2213,8 +2435,10 @@ if __name__ == "__main__":
         from db.setup import init_db
 
         if cfg.PRINT_DEBUG:
-            print(
-                f"⚠️ Database file not found at {cfg.DB_ROOT_PATH}. Initializing new database."
+            debug_log(
+                "INFO",
+                "🗄️",
+                f"Database file not found at {cfg.DB_ROOT_PATH}. Initializing new database.",
             )
 
         init_db(cfg.DB_ROOT_PATH, cfg.PRINT_DEBUG)

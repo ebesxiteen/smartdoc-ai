@@ -34,6 +34,14 @@ TOP_K_CHUNKS_FOR_QUESTIONS: int = 3
 # Use this answer as a fallback when LLM generate an empty response after tag removal (in random rare cases), also to prevent DB insertion error and ensure user gets a response even if LLM fails to generate text
 NOT_FOUND_ANSWER_FALL_BACK: str = "Sorry, I couldn't find any relevant information in the documents to answer your question. Please try rephrasing or ask about a different topic."
 
+# For hybrid search: weight for combining semantic similarity and BM25 keyword matching scores (range 0.0 to 1.0 as total, where 0.5 means equal weighting)
+WEIGHT_SEMANTIC: float = 0.5
+WEIGHT_BM25: float = 0.5
+
+# The "magic number" for RRF (Reciprocal Rank Fusion) re-ranking algorithm, which helps to balance the influence of rank positions in the final combined score.
+# Higher values makes the ranking less "aggressive" and more tolerant to lower-ranked results, while lower values makes it more "aggressive" and focused on top-ranked results.
+RRF_C: int = 60
+
 # ============================================================================
 # MULTI-LANGUAGE GREETING PATTERNS
 # ============================================================================
@@ -248,10 +256,10 @@ RAG_RETRIEVAL_K: int = 8
 RAG_RETRIEVAL_MIN_RESULTS: int = 1
 
 # Euclidean Distance (L2): similarity score threshold for quality filtering (FAISS distance: lower = better match)
-# 0.5-1.0 = Strict filtering (only highest quality matches)
-# 1.0-1.5 = Moderate filtering (balanced quality/quantity)
-# 1.5-2.0 = Loose filtering (include more results even if less relevant)
-RAG_RETRIEVAL_SCORE_THRESHOLD: float = 1.5
+# 5.0-10.0 = Strict filtering (only highest quality matches)
+# 10.0-15.0 = Moderate filtering (balanced quality/quantity)
+# 15.0-Infinity = Loose filtering (include more results even if less relevant)
+RAG_RETRIEVAL_SCORE_THRESHOLD: float = 15.0
 
 # Max length per chunk in characters (prevents extremely long single chunks)
 RAG_MAX_CHUNK_LEN: int = 1000
@@ -353,8 +361,8 @@ RAG_RETRIEVAL_MIN_RESULTS_HELP_MSG = "Minimum number of retrieved chunks to use 
 
 # Retrieval score threshold
 RAG_RETRIEVAL_SCORE_THRESHOLD_MIN: float = 0.0
-RAG_RETRIEVAL_SCORE_THRESHOLD_MAX: float = 2.0
-RAG_RETRIEVAL_SCORE_THRESHOLD_STEP: float = 0.05
+RAG_RETRIEVAL_SCORE_THRESHOLD_MAX: float = 30.0
+RAG_RETRIEVAL_SCORE_THRESHOLD_STEP: float = 0.5
 RAG_RETRIEVAL_SCORE_THRESHOLD_HELP_MSG: str = "Similarity score threshold for filtering retrieved chunks (lower = stricter). Adjust based on your documents and embedding model for best results."
 
 # Max chunk length
@@ -399,3 +407,145 @@ LLM_TEMPERATURE_HELP_MSG: str = "Controls creativity. Range 0.1 - 0.3 is best fo
 # System Prompt Override
 PERSONAL_CTX_HELP_MSG: str = "Custom instructions or your personal background to guide the AI's behavior and personality."
 PERSONAL_CTX_PLACEHOLDER: str = "E.g., I am a high school biology teacher..."
+
+WEIGHT_SEMANTIC_MIN: float = 0.0
+WEIGHT_SEMANTIC_MAX: float = 1.0
+WEIGHT_SEMANTIC_STEP: float = 0.05
+WEIGHT_SEMANTIC_HELP_MSG: str = "Balance between Semantic Vector Search (set value) and Keyword BM25 Search (remaining value). BM25 is better for exact technical terms while Semantic is better for concepts."
+
+# ============================================================================
+# DEBUG LOGGING CONFIGURATIONS
+# ============================================================================
+# Structured logging emoji categories - Each emoji uniquely identifies a log type
+LOG_CATEGORIES = {
+    # Task Initialization & Start
+    "TASK_START": {
+        "emoji": "🚀",
+        "type": "INFO",
+        "description": "Starting a major task or operation",
+    },
+    "LOAD_START": {
+        "emoji": "📂",
+        "type": "INFO",
+        "description": "Starting to load/read files",
+    },
+    "PROCESS_START": {
+        "emoji": "⚙️",
+        "type": "INFO",
+        "description": "Starting data processing step",
+    },
+    # Operations & Completion
+    "SUCCESS": {
+        "emoji": "✅",
+        "type": "SUCCESS",
+        "description": "Operation completed successfully",
+    },
+    "COMPLETE": {
+        "emoji": "✔️",
+        "type": "SUCCESS",
+        "description": "Task fully completed",
+    },
+    "MERGED": {
+        "emoji": "🔀",
+        "type": "SUCCESS",
+        "description": "Data merger/combination operation",
+    },
+    "SAVED": {
+        "emoji": "💾",
+        "type": "SUCCESS",
+        "description": "Data saved to storage/database",
+    },
+    # Data & Search Operations
+    "QUERY": {"emoji": "🔍", "type": "INFO", "description": "Query/search operation"},
+    "RETRIEVE": {
+        "emoji": "📦",
+        "type": "INFO",
+        "description": "Retrieving data from storage",
+    },
+    "CHUNK": {"emoji": "📄", "type": "INFO", "description": "Chunking/splitting data"},
+    "EMBED": {
+        "emoji": "🧬",
+        "type": "INFO",
+        "description": "Embedding/vectorization operation",
+    },
+    "SEARCH": {
+        "emoji": "🔎",
+        "type": "INFO",
+        "description": "Performing search in vectorstore",
+    },
+    # AI/LLM Operations
+    "LLM_INIT": {
+        "emoji": "🤖",
+        "type": "INFO",
+        "description": "Initializing or calling LLM",
+    },
+    "CHAIN": {
+        "emoji": "⛓️",
+        "type": "INFO",
+        "description": "Building or invoking RAG chain",
+    },
+    "HISTORY": {
+        "emoji": "📜",
+        "type": "INFO",
+        "description": "Processing chat history",
+    },
+    "RESPONSE": {"emoji": "💬", "type": "INFO", "description": "LLM response received"},
+    # Retrieval Strategy
+    "RETRIEVER_INIT": {
+        "emoji": "🎯",
+        "type": "INFO",
+        "description": "Initializing retriever strategy",
+    },
+    "SEMANTIC": {
+        "emoji": "🧠",
+        "type": "INFO",
+        "description": "Semantic/vector retrieval mode",
+    },
+    "KEYWORD": {
+        "emoji": "🔑",
+        "type": "INFO",
+        "description": "Keyword/BM25 retrieval mode",
+    },
+    "HYBRID": {
+        "emoji": "🔀",
+        "type": "INFO",
+        "description": "Hybrid retrieval mode (semantic + keyword)",
+    },
+    "FALLBACK": {
+        "emoji": "🔄",
+        "type": "INFO",
+        "description": "Fallback retrieval strategy activated",
+    },
+    # Warnings & Cautions
+    "WARN": {
+        "emoji": "⚠️",
+        "type": "WARNING",
+        "description": "Warning - potential issue",
+    },
+    "SKIP": {"emoji": "⊘", "type": "WARNING", "description": "Skipping operation/step"},
+    "THRESHOLD": {
+        "emoji": "📊",
+        "type": "WARNING",
+        "description": "Threshold-related alert",
+    },
+    "FALLBACK_ACTIVE": {
+        "emoji": "🛡️",
+        "type": "WARNING",
+        "description": "Fallback mechanism activated",
+    },
+    # Errors & Failures
+    "ERROR": {"emoji": "❌", "type": "ERROR", "description": "Error occurred"},
+    "FAIL": {"emoji": "💥", "type": "ERROR", "description": "Operation failed"},
+    "MISSING": {
+        "emoji": "🚫",
+        "type": "ERROR",
+        "description": "Missing required data/resource",
+    },
+    # Debug & Inspection
+    "DEBUG": {"emoji": "🔬", "type": "INFO", "description": "Debug information"},
+    "STATS": {"emoji": "📈", "type": "INFO", "description": "Statistics/metrics"},
+    "CACHE": {"emoji": "💾", "type": "INFO", "description": "Cache operation"},
+    # Misc/Utility
+    "SECTION": {"emoji": "📍", "type": "INFO", "description": "Section marker"},
+    "ITEM": {"emoji": "•", "type": "INFO", "description": "List item"},
+}

@@ -1,5 +1,6 @@
 import sqlite3
 import core.configs as cfg
+from core.utils import debug_log
 
 
 def init_db(db_name: str = cfg.DB_ROOT_PATH, print_debug: bool = False) -> None:
@@ -69,8 +70,7 @@ def init_db(db_name: str = cfg.DB_ROOT_PATH, print_debug: bool = False) -> None:
     """)
 
     # 5. Create Notebook Settings Table
-    cursor.execute(
-        f"""
+    cursor.execute(f"""
         CREATE TABLE IF NOT EXISTS notebook_settings (
             id TEXT PRIMARY KEY NOT NULL,
             notebook_id TEXT NOT NULL UNIQUE,
@@ -85,14 +85,17 @@ def init_db(db_name: str = cfg.DB_ROOT_PATH, print_debug: bool = False) -> None:
             llm_num_ctx INTEGER DEFAULT {cfg.LLM_NUM_CTX},
             llm_temp REAL DEFAULT {cfg.LLM_TEMPERATURE},
             personal_ctx TEXT,
+            weight_semantic REAL DEFAULT {cfg.WEIGHT_SEMANTIC},
+            weight_bm25 REAL DEFAULT {cfg.WEIGHT_BM25},
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (notebook_id) REFERENCES notebooks (id) ON DELETE CASCADE
         )
-        """
-    )
+        """)
 
     conn.commit()
     conn.close()
     if print_debug:
-        print(f"✅ Database '{db_name}' initialized with NotebookLM schema.")
+        debug_log(
+            "INFO", "🗄️", f'Database "{db_name}" initialized with NotebookLM schema.'
+        )

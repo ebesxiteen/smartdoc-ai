@@ -359,9 +359,9 @@ def upsert_notebook_settings(notebook_id: str, settings: Dict[str, Any]) -> None
                 rag_retrieval_score_threshold, rag_max_chunk_len,
                 rag_chunk_overlap, rag_max_ctx_len, max_msg_history,
                 llm_model_name, llm_num_ctx, llm_temp, personal_ctx,
-                updated_at
+                weight_semantic, weight_bm25, updated_at
             ) VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP
             ) ON CONFLICT(notebook_id) DO UPDATE SET
                 rag_retrieval_k=excluded.rag_retrieval_k,
                 rag_retrieval_min_results=excluded.rag_retrieval_min_results,
@@ -374,6 +374,8 @@ def upsert_notebook_settings(notebook_id: str, settings: Dict[str, Any]) -> None
                 llm_num_ctx=excluded.llm_num_ctx,
                 llm_temp=excluded.llm_temp,
                 personal_ctx=excluded.personal_ctx,
+                weight_semantic=excluded.weight_semantic,
+                weight_bm25=excluded.weight_bm25,
                 updated_at=CURRENT_TIMESTAMP;
             """,
             (
@@ -390,6 +392,8 @@ def upsert_notebook_settings(notebook_id: str, settings: Dict[str, Any]) -> None
                 settings.get("llm_num_ctx"),
                 settings.get("llm_temp"),
                 settings.get("personal_ctx"),
+                settings.get("weight_semantic"),
+                settings.get("weight_bm25"),
             ),
         )
         conn.commit()

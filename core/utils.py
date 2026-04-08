@@ -36,7 +36,27 @@ logger = logging.getLogger(__name__)
 
 @st.cache_data(show_spinner=False)
 def get_system_hardware_info() -> Dict[str, Any]:
-    """Gather system hardware capabilities for dynamic UI warnings."""
+    """
+    Detect and gather system hardware capabilities including CPU, RAM, and GPU.
+
+    This function probes the system for hardware information to enable dynamic
+    UI warnings and RAG parameter optimization based on available resources.
+    GPU detection attempts to use PyTorch/CUDA if available, with graceful fallback
+    to CPU-only mode if GPU detection fails.
+
+    Returns:
+        Dict[str, Any]: Hardware capabilities dictionary containing:
+            - os (str): Operating system name (e.g., "Linux", "Darwin", "Windows")
+            - cpu_cores (int): Number of logical CPU cores
+            - ram_gb (float): Total RAM in gigabytes
+            - gpu_name (str): GPU model name or "None/Integrated" if not available
+            - vram_gb (float): Total GPU VRAM in gigabytes (0.0 if no GPU)
+
+    Example:
+        >>> hw_info = get_system_hardware_info()
+        >>> if hw_info["vram_gb"] > 0:
+        ...     print(f"GPU detected: {hw_info['gpu_name']}")
+    """
     # OS & CPU & RAM
     os_name = platform.system()
     cpu_cores = psutil.cpu_count(logical=True)
@@ -53,11 +73,11 @@ def get_system_hardware_info() -> Dict[str, Any]:
             gpu_name = torch.cuda.get_device_name(0)
             # torch limits might not reflect exact system VRAM,
             # but usually get_device_properties gives total_memory in bytes
-            props: Any = torch.cuda.get_device_properties(0)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
-            total_memory_bytes: int = getattr(props, "total_memory", 0)  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]
-            total_vram_gb = round(total_memory_bytes / (1024**3), 1)
+            props = getattr(torch.cuda, "get_device_properties")(0)
+            total_memory_bytes = getattr(props, "total_memory", 0)
+            total_vram_gb = round(int(total_memory_bytes) / (1024**3), 1)
     except Exception as e:
-        logger.debug(f"Failed to detect GPU via torch: {e}")
+        debug_log("WARN", message=f"GPU detection failed: {e}")
 
     return {
         "os": os_name,
@@ -69,6 +89,32 @@ def get_system_hardware_info() -> Dict[str, Any]:
 
 
 def get_default_notebook_settings() -> Dict[str, Any]:
+    """
+    Get default notebook configuration settings for RAG pipeline initialization.
+
+    Returns a dictionary of default settings covering retrieval parameters (K value,
+    score thresholds, chunk sizes), LLM configuration (model name, temperature,
+    context window), and hybrid search weights (semantic vs. keyword balance).
+
+    Returns:
+        Dict[str, Any]: Default settings dictionary with keys:
+            - rag_retrieval_k (int): Number of top chunks to retrieve
+            - rag_retrieval_min_results (int): Minimum guaranteed results
+            - rag_retrieval_score_threshold (float): Similarity score threshold
+            - rag_max_chunk_len (int): Maximum chunk size in characters
+            - rag_chunk_overlap (int): Overlap between consecutive chunks
+            - rag_max_ctx_len (int): Maximum context length for LLM
+            - max_msg_history (int): Maximum chat history messages to retain
+            - llm_model_name (str): Ollama model name
+            - llm_num_ctx (int): LLM context window size
+            - llm_temp (float): LLM temperature (0.0-2.0)
+            - personal_ctx (None): Custom instructions placeholder
+            - weight_semantic (float): Weight for semantic (0.0-1.0)
+            - weight_bm25 (float): Weight for BM25 keyword search (0.0-1.0)
+
+    Note:
+        All values are loaded from core/configs.py. Modify settings there to change defaults.
+    """
     return {
         "rag_retrieval_k": cfg.RAG_RETRIEVAL_K,
         "rag_retrieval_min_results": cfg.RAG_RETRIEVAL_MIN_RESULTS,
@@ -81,12 +127,34 @@ def get_default_notebook_settings() -> Dict[str, Any]:
         "llm_num_ctx": cfg.LLM_NUM_CTX,
         "llm_temp": cfg.LLM_TEMPERATURE,
         "personal_ctx": None,
+        "weight_semantic": cfg.WEIGHT_SEMANTIC,
+        "weight_bm25": cfg.WEIGHT_BM25,
     }
 
 
 def _load_notebook_settings(
     notebook_id: Optional[str],
 ) -> Dict[str, Any]:
+    """
+    Load notebook-specific settings from the database, with fallback to defaults.
+
+    Retrieves persisted settings for a specific notebook from the database.
+    If the notebook ID is None or notebook has no custom settings, returns
+    default settings from get_default_notebook_settings().
+
+    Args:
+        notebook_id: The UUID of the notebook to load settings for.
+                    If None, default settings are returned.
+
+    Returns:
+        Dict[str, Any]: Complete settings dictionary for the notebook.
+                       If notebook has custom settings, those are merged with defaults.
+
+    Note:
+        This is an internal function used to ensure all RAG chains always have
+        complete settings dictionaries, even if the notebook doesn't have
+        explicitly saved settings.
+    """
     defaults = get_default_notebook_settings()
     if not notebook_id:
         return defaults
@@ -109,6 +177,8 @@ def _load_notebook_settings(
         "llm_num_ctx": settings.get("llm_num_ctx"),
         "llm_temp": settings.get("llm_temp"),
         "personal_ctx": settings.get("personal_ctx"),
+        "weight_semantic": settings.get("weight_semantic", cfg.WEIGHT_SEMANTIC),
+        "weight_bm25": settings.get("weight_bm25", cfg.WEIGHT_BM25),
     }
 
 
@@ -119,14 +189,130 @@ def _load_notebook_settings(
 
 def clean_spaces(text: str) -> str:
     """
-    Normalizes whitespace: removes leading/trailing spaces and
-    collapses multiple internal spaces into a single one.
+    Normalize whitespace in text by removing leading/trailing spaces and
+    collapsing multiple internal spaces into single spaces.
+
+    This is useful for cleaning text extracted from PDFs or other sources
+    that may have inconsistent whitespace formatting.
+
+    Args:
+        text: Input string to normalize.
+
+    Returns:
+        str: Text with normalized whitespace. Returns empty string if input is falsy.
+
+    Example:
+        >>> clean_spaces("  Hello    world  ")
+        'Hello world'
     """
     if not text:
         return ""
     # .split() without arguments splits by any whitespace (space, \n, \t)
     # ' '.join(...) puts exactly one space between each word
     return " ".join(text.split())
+
+
+# ============================================================================
+# DEBUG LOGGING UTILITIES & CONSTANTS
+# ============================================================================
+
+
+def print_breaker() -> None:
+    """
+    Print a visual separator line in logs to demarcate logical sections.
+
+    Outputs a 70-character wide line (━) to visually divide log sections,
+    improving readability when scanning terminal output.
+    """
+    separator = "━" * 70
+    logger.info(separator)
+
+
+def debug_log(
+    log_type: str = "INFO",
+    emoji: Optional[str] = None,
+    message: str = "",
+    color: Optional[str] = None,
+    show_metadata: bool = True,
+) -> None:
+    """
+    Enhanced structured logging with automatic categorization and ANSI color support.
+
+    This logger provides consistent, visually distinct log messages with automatic
+    color mapping, caller metadata extraction, and support for structured log categories.
+
+    Args:
+        log_type: Log category or severity type. Can be:
+                 - Standard type: "INFO", "WARNING", "ERROR", "SUCCESS"
+                 - Structured category: Any key from LOG_CATEGORIES dict
+                 Default: "INFO"
+        emoji: Emoji to prefix the log message. If None and log_type is a key
+               in LOG_CATEGORIES, the emoji from that category is used.
+               Default: None
+        message: The main log message content.
+                Default: ""
+        color: Optional ANSI color code override (e.g., "31" for red).
+               If not provided, color is determined by log_type.
+               Default: None
+        show_metadata: Whether to include caller filename and line number in output.
+                      Default: True
+
+    Example:
+        >>> debug_log("SUCCESS", "✅", "File loaded successfully")
+        >>> debug_log("KEYWORD", message="Using BM25 keyword search")
+        >>> debug_log("WARN", message="Threshold not met, using fallback")
+    """
+    import inspect
+    import os
+
+    # 1. Define Default Color Map
+    # ANSI color codes: 31=Red, 33=Yellow, 36=Cyan, 32=Green
+    COLOR_MAP = {
+        "ERROR": "31",
+        "WARNING": "33",
+        "INFO": "36",
+        "SUCCESS": "32",
+    }
+
+    # 2. Normalize type and determine emoji + color
+    normalized_type = (log_type or "INFO").upper()
+
+    # Check if it's a structured category
+    if normalized_type in cfg.LOG_CATEGORIES:
+        category = cfg.LOG_CATEGORIES[normalized_type]
+        used_emoji = emoji or category["emoji"]
+        used_type = category["type"]
+        final_color = color if color else COLOR_MAP.get(used_type, "36")
+    else:
+        used_emoji = emoji
+        used_type = normalized_type
+        final_color = color if color else COLOR_MAP.get(normalized_type, "36")
+
+    # 3. Capture caller metadata (if enabled)
+    metadata_str = ""
+    if show_metadata:
+        frame = inspect.stack()[1]
+        filename = os.path.basename(frame.filename)
+        lineno = frame.lineno
+        metadata_str = f"\033[{final_color}m[{filename}:{lineno}]\033[0m"
+
+    # 4. Format the output
+    # \u2009 is a thin space to prevent emoji overlap
+    prefix = f"{used_emoji}\u2009" if used_emoji else ""
+    if metadata_str:
+        printed_message = f"{prefix}{metadata_str} {message}"
+    else:
+        printed_message = f"{prefix}{message}"
+
+    # 5. Route to logger based on type
+    if used_type == "ERROR":
+        logger.error(printed_message)
+    elif used_type == "WARNING":
+        logger.warning(printed_message)
+    elif used_type == "SUCCESS":
+        logger.info(printed_message)
+    else:
+        logger.info(printed_message)
 
 
 # ============================================================================
@@ -141,16 +327,40 @@ def load_and_chunk_file(
     chunk_overlap: int = cfg.RAG_CHUNK_OVERLAP,
     print_debug: bool = False,
     progress_callback: Optional[Callable[[str], None]] = None,
-):
+) -> List[Document]:
     """
-    Load a file (PDF or DOCX) and chunk it into overlapping segments.
+    Load a file (PDF or DOCX) and split it into overlapping text chunks.
+
+    This function extracts text from PDF or DOCX files and uses a recursive
+    text splitter to create overlapping chunks suitable for embedding and RAG.
+    Progress updates can be provided via callback for UI integration.
 
     Args:
-      file_path: Path to the file
-      file_type: Type of the file ('pdf' or 'docx')
+        file_path: Absolute path to the file to load.
+        file_type: File format - either "pdf" or "docx".
+        chunk_size: Maximum characters per chunk. Default from configs.py.
+        chunk_overlap: Character overlap between consecutive chunks. Default from configs.py.
+        print_debug: If True, log detailed processing information. Default False.
+        progress_callback: Optional callable to receive progress messages (e.g., for UI progress bar).
 
     Returns:
-      List of Document objects with chunked text
+        List[Document]: LangChain Document objects with chunked text content and metadata.
+                       Each document contains:
+                       - page_content: Chunk text
+                       - metadata: {"source": file_path, "page": page_number, "document": filename}
+
+    Raises:
+        ValueError: If file_type is neither "pdf" nor "docx".
+        Exception: Various exceptions from PyMuPDF or python-docx if file parsing fails.
+
+    Example:
+        >>> chunks = load_and_chunk_file(
+        ...     "document.pdf",
+        ...     "pdf",
+        ...     chunk_size=1000,
+        ...     print_debug=True
+        ... )
+        >>> print(f"Created {len(chunks)} chunks")
     """
     from langchain_text_splitters import RecursiveCharacterTextSplitter
 
@@ -186,9 +396,10 @@ def load_and_chunk_file(
         raise ValueError(f"Unsupported file type for loading: {file_type}")
 
     if print_debug:
-        print(f"✅ Loaded {file_type.upper()}: {file_path}")
-        print(f"   Total documents/pages: {len(documents)}")
-        print(f"   Total characters: {sum(len(d.page_content) for d in documents)}")
+        debug_log(
+            "SUCCESS",
+            message=f"Loaded {file_type.upper()}: {file_path}\n      {len(documents)} pages | {sum(len(d.page_content) for d in documents)} chars",
+        )
 
     # Step 2: Split into chunks
     if progress_callback:
@@ -207,22 +418,49 @@ def load_and_chunk_file(
     chunks = text_splitter.split_documents(documents)
 
     if print_debug:
-        print("\n✅ Chunking complete!")
-        print(f"   Total chunks: {len(chunks)}")
-        print(
-            f"   Average chunk size: {sum(len(chunk.page_content) for chunk in chunks) / len(chunks):.0f} characters"
+        avg_chunk_size = (
+            sum(len(chunk.page_content) for chunk in chunks) / len(chunks)
+            if chunks
+            else 0
+        )
+        debug_log(
+            "COMPLETE",
+            message=f"Chunking complete: {len(chunks)} chunks\n      Avg chunk size: {avg_chunk_size:.0f} chars",
         )
 
     return chunks
 
 
 def hash_file_content(file_bytes: bytes) -> str:
-    """Calculate MD5 hash of file content."""
+    """
+    Calculate MD5 hash of file content for duplicate detection.
+
+    Args:
+        file_bytes: Raw file content as bytes.
+
+    Returns:
+        str: Hex-encoded MD5 hash of the file content.
+
+    Note:
+        MD5 is used for duplicate detection only, not security. SHA256 could
+        be used for enhanced security if needed in future.
+    """
     return hashlib.md5(file_bytes).hexdigest()
 
 
 def detect_file_type(file_bytes: bytes) -> str:
-    """Detect file type based on magic numbers."""
+    """
+    Detect file type based on magic number (file signature bytes).
+
+    Args:
+        file_bytes: First few bytes of the file content.
+
+    Returns:
+        str: Detected file type - either "pdf" or "docx".
+
+    Raises:
+        ValueError: If file type is neither PDF nor DOCX.
+    """
     if file_bytes.startswith(b"%PDF"):
         return "pdf"
     elif (
@@ -238,7 +476,15 @@ def detect_file_type(file_bytes: bytes) -> str:
 
 
 def check_file_already_exists(file_hash: str) -> Optional[Dict[str, Any]]:
-    """Check if a file with this hash was already uploaded globally."""
+    """
+    Check if a file with the given hash was already uploaded to any notebook.
+
+    Args:
+        file_hash: MD5 hash of file content from hash_file_content().
+
+    Returns:
+        Dict[str, Any]: Source document info if found, None if not found.
+    """
     from db.crud import get_source_by_hash
 
     return get_source_by_hash(file_hash)
@@ -247,7 +493,16 @@ def check_file_already_exists(file_hash: str) -> Optional[Dict[str, Any]]:
 def check_file_already_exists_in_notebook(
     file_hash: str, notebook_id: str
 ) -> Optional[Dict[str, Any]]:
-    """Check if a file with this hash already exists in THIS specific notebook."""
+    """
+    Check if a file with the given hash was already uploaded to a specific notebook.
+
+    Args:
+        file_hash: MD5 hash of file content from hash_file_content().
+        notebook_id: UUID of the notebook to check within.
+
+    Returns:
+        Dict[str, Any]: Source document info if found in this notebook, None if not found.
+    """
     from db.crud import get_source_by_hash_and_notebook
 
     return get_source_by_hash_and_notebook(file_hash, notebook_id)
@@ -262,9 +517,28 @@ def chunk_and_process_file(
     chunk_size: int = cfg.RAG_MAX_CHUNK_LEN,
     chunk_overlap: int = cfg.RAG_CHUNK_OVERLAP,
 ) -> Tuple[List[Document], int]:
-    """Load File, chunk it, and add metadata."""
+    """
+    Load a file, split into chunks, and enrich with metadata.
+
+    Wraps load_and_chunk_file() to add the original filename to chunk metadata
+    for source attribution in RAG responses.
+
+    Args:
+        file_path: Absolute path to the file.
+        file_type: "pdf" or "docx".
+        filename: Display name of the file (for metadata).
+        print_debug: Enable debug logging.
+        progress_callback: Optional progress update callback.
+        chunk_size: Maximum chunk size in characters.
+        chunk_overlap: Character overlap between chunks.
+
+    Returns:
+        Tuple[List[Document], int]: Tuple of:
+            - List of Document objects with metadata
+            - Count of created chunks
+    """
     if print_debug:
-        logger.info(f"Loading and chunking {file_type.upper()}: {filename}")
+        debug_log("INFO", "📄", f"Loading and chunking {file_type.upper()}: {filename}")
     chunks = load_and_chunk_file(
         file_path,
         file_type,
@@ -284,9 +558,19 @@ def chunk_and_process_file(
 def create_vectorstore_from_chunks(
     chunks: List[Document], embeddings: HuggingFaceEmbeddings, print_debug: bool = False
 ) -> FAISS:
-    """Create FAISS vectorstore from document chunks."""
+    """
+    Create a FAISS vector database from document chunks.
+
+    Args:
+        chunks: List of Document objects with text content to embed and index.
+        embeddings: HuggingFaceEmbeddings instance for vectorization.
+        print_debug: Enable debug logging.
+
+    Returns:
+        FAISS: Vector store instance ready for similarity search.
+    """
     if print_debug:
-        logger.info(f"Creating vectorstore from {len(chunks)} chunks")
+        debug_log("EMBED", message=f"Creating vectorstore from {len(chunks)} chunks...")
     return FAISS.from_documents(chunks, embeddings)
 
 
@@ -295,14 +579,27 @@ def merge_vectorstores(
     new_vectorstore: FAISS,
     print_debug: bool = False,
 ) -> FAISS:
-    """Merge new vectorstore into existing one, or return new if none exists."""
+    """
+    Merge a new vectorstore into an existing one, or return the new one if none exists.
+
+    Used when multiple sources are added to a notebook to maintain a consolidated
+    vectorstore for efficient similarity search across all sources.
+
+    Args:
+        existing_vectorstore: Current FAISS vectorstore or None.
+        new_vectorstore: New FAISS vectorstore to merge in.
+        print_debug: Enable debug logging.
+
+    Returns:
+        FAISS: Merged vectorstore combining both inputs, or new_vectorstore if no existing one.
+    """
     if existing_vectorstore is None:
         if print_debug:
-            logger.info("No existing vectorstore, using new one")
+            debug_log("TASK_START", message="No existing vectorstore - using new one")
         return new_vectorstore
 
     if print_debug:
-        logger.info("Merging vectorstores")
+        debug_log("MERGED", message="Vectorstores merged successfully")
     existing_vectorstore.merge_from(new_vectorstore)
     return existing_vectorstore
 
@@ -318,16 +615,33 @@ def save_source_to_database(
     source_id: Optional[str] = None,
     print_debug: bool = False,
 ) -> str:
-    """Save source metadata and vectorstore path to database.
+    """
+    Save source file metadata and vectorstore location to the database.
+
+    Records a new source document in the notebook, linking it to its FAISS vectorstore.
+    Enables tracking of document sources for citation and content refresh.
 
     Args:
-        source_id: Pre-generated UUID (pass when you need it upfront for path calculation).
-                   If None, a new UUID is generated internally.
+        notebook_id: UUID of the notebook this source belongs to.
+        filename: Original filename displayed to users.
+        file_type: "pdf" or "docx".
+        file_hash: MD5 hash of file content for duplicate detection.
+        summary: AI-generated summary of the document.
+        suggested_questions: List of auto-generated discussion questions.
+        vectorstore_path: Path to the saved FAISS vectorstore directory.
+        source_id: Optional pre-generated UUID. If None, one is created.
+        print_debug: Enable debug logging.
+
+    Returns:
+        str: The source_id (UUID) assigned to this source.
+
+    Note:
+        The vectorstore_path is typically computed via get_source_vectorstore_dir().
     """
     from middlewares import db_middleware as db
 
     if print_debug:
-        logger.info(f"Saving source to database: {filename}")
+        debug_log("SAVED", message=f"Saving source to database: {filename}")
 
     if source_id is None:
         source_id = str(uuid.uuid4())
@@ -360,33 +674,39 @@ def process_user_query(
     notebook_id: Optional[str] = None,
 ) -> tuple[str, List[Dict[str, Any]], bool]:
     """
-    Process a user query through the RAG chain with optional chat history context.
+    Process a user query through the RAG pipeline to generate an answer with source citations.
 
-    Handles three scenarios:
-    1. Greeting/general questions: Answer without searching documents
-    2. Follow-up questions: Use chat history to rephrase for accurate retrieval
-    3. New questions: Direct document search and answer
+    Handles three query scenarios:
+    1. Greetings/General knowledge: Answer without document retrieval
+    2. Follow-up questions: Use chat history to rephrase query for better retrieval
+    3. Standalone questions: Direct document retrieval and answering
+
+    Args:
+        query: The user's question.
+        rag_chain: The instantiated RAG chain from create_history_aware_rag_chain().
+        vectorstore: FAISS vectorstore for document retrieval.
+        chat_history: Optional list of previous Q&A exchanges for context.
+        print_debug: Enable detailed debug logging.
+        notebook_id: UUID of the notebook for loading settings.
 
     Returns:
-        (answer, sources_list, found_answer)
-        - answer: The LLM's response (with [STATUS: ...] tag removed)
-        - sources_list: Top sources for display
-        - found_answer: Boolean indicating if LLM found useful context (defaults to True if not specified)
+        Tuple[str, List[Dict[str, Any]], bool]:
+            - answer (str): Clean LLM response (with status tags removed)
+            - sources (List[Dict]): Citation sources with keys: document, page, content
+            - found_answer (bool): Whether relevant context was found (affects UI display)
+
+    Note:
+        Answers are tagged with [STATUS: DOC_ANSWER], [STATUS: DOC_MISSING], or [STATUS: GENERAL].
+        These tags are stripped before returning to maintain clean output.
     """
     if print_debug:
-        print("\n")
-        logger.info(
-            f"🔡\tProcessing query: {query[:60]}..."
-            if len(query) > 60
-            else f"🔡\tProcessing query: {query}"
-        )
+        query_preview = f"{query[:60]}..." if len(query) > 60 else query
+        debug_log("QUERY", message=f"Processing: {query_preview}")
 
     # Step 1: Check if this is a greeting/general question
     is_greeting_query = is_greeting(query)
     if print_debug and is_greeting_query:
-        logger.info(
-            "👥💬\tDetected greeting/general question - using general knowledge"
-        )
+        debug_log("DEBUG", message="Detected greeting → using general knowledge")
 
     settings = _load_notebook_settings(notebook_id)
 
@@ -407,9 +727,9 @@ def process_user_query(
         )
         chain_input_dict["chat_history"] = formatted_history
         if print_debug:
-            logger.info("   " + "━" * 60)
-            logger.info(
-                f"   📜\tIncluding {len(formatted_history)} history messages for context"
+            print_breaker()
+            debug_log(
+                "HISTORY", message=f"Chat history: {len(formatted_history)} messages"
             )
             for msg in formatted_history:
                 role_icon = "👤" if msg.type == "human" else "🤖"
@@ -420,32 +740,32 @@ def process_user_query(
                     if len(content_preview) > 70
                     else content_preview
                 )
-                logger.info(f"      {role_icon}\t{content_preview}")
-            logger.info("   " + "━" * 60)
+                debug_log("ITEM", emoji=role_icon, message=content_preview)
+            print_breaker()
 
     # Step 3: Generate answer through RAG chain
     if print_debug:
         if is_greeting_query:
-            logger.info("   ⏳\tInvoking RAG chain with general knowledge mode...")
+            debug_log("CHAIN", message="Invoking RAG chain [General Knowledge Mode]...")
         else:
-            logger.info("   ⏳\tInvoking RAG chain with quality-filtered chunks...")
+            debug_log(
+                "CHAIN", message="Invoking RAG chain [Document Retrieval Mode]..."
+            )
 
     try:
         # Invoke chain with proper input structure
         # The history-aware chain expects dict with "input" and optional "chat_history"
         answer = rag_chain.invoke(chain_input_dict)
     except Exception as e:
-        logger.error(f"Error invoking RAG chain: {e}")
-        if print_debug:
-            logger.error(f"    Full error: {str(e)}")
+        debug_log("ERROR", message=f"RAG chain failed: {e}")
         answer = f"[STATUS: DOC_MISSING]\nI encountered an error processing your query: {str(e)}"
 
     if print_debug:
-        logger.info(f"   💬\tLLM response generated ({len(answer)} chars)")
+        debug_log("RESPONSE", message=f"LLM response generated ({len(answer)} chars)")
 
         # Log the actual answer cleanly
-        logger.info("   " + "━" * 60)
-        logger.info("   🤖\tLLM Answer:")
+        print_breaker()
+        debug_log("LLM_INIT", message="LLM Answer:")
 
         # Split by newlines so it aligns cleanly in the terminal
         for idx, line in enumerate(answer.split("\n")):
@@ -453,10 +773,10 @@ def process_user_query(
                 # To prevent overwhelming logs, limit to first 10 lines max or 1000 chars
                 if idx > 9 or len(line) > 150:
                     preview = line[:150] + "..." if len(line) > 150 else line
-                    logger.info(f"      {preview}")
+                    debug_log("INFO", None, f"{preview}")
                 else:
-                    logger.info(f"      {line}")
-        logger.info("   " + "━" * 60)
+                    debug_log("INFO", None, f"{line}")
+        print_breaker()
 
     # Step 4: Parse [STATUS: DOC_ANSWER/DOC_MISSING/GENERAL] tag from answer
     found_answer = True  # Default to True
@@ -487,21 +807,25 @@ def process_user_query(
 
     if print_debug:
         if found_answer and not is_general_answer:
-            logger.info("   📍\tLLM found relevant context - sources will be displayed")
+            debug_log(
+                "INFO", "📍", "LLM found relevant context - sources will be displayed"
+            )
         elif is_general_answer:
-            logger.info(
-                "   💬\tLLM answered from general knowledge - no sources needed"
+            debug_log(
+                "INFO", "💬", "LLM answered from general knowledge - no sources needed"
             )
         else:
-            logger.warning(
-                "   ⚠️\tLLM did not find relevant context - sources will be hidden"
+            debug_log(
+                "INFO",
+                "⚠️",
+                "LLM did not find relevant context - sources will be hidden",
             )
 
     # Step 5: Retrieve source documents for display (only if not a general question)
     sources: List[Dict[str, Any]] = []
 
     if not is_general_answer and print_debug:
-        logger.info("   📎\tGathering exact retrieved sources for display...")
+        debug_log("INFO", "📎", "Gathering exact retrieved sources for display...")
 
     if not is_general_answer:
         # Use the exact documents retrieved during the RAG chain invoke
@@ -532,13 +856,15 @@ def process_user_query(
             }
             sources.append(source_entry)
             if print_debug:
-                logger.info(
-                    f"      • Source {i}: {source_entry['document']} (Page {source_entry['page']})"
+                debug_log(
+                    "INFO",
+                    None,
+                    f"• Source {i}: {source_entry['document']} (Page {source_entry['page']})",
                 )
 
         if print_debug:
-            logger.info("   " + "━" * 60)
-            logger.info(f"   ✅\tProcessed {len(sources)} display sources for UI")
+            print_breaker()
+            debug_log("INFO", "📎", f"Processed {len(sources)} display sources for UI")
 
     return answer_clean, sources, found_answer
 
@@ -554,7 +880,11 @@ def save_query_and_answer_to_history(
     from middlewares import db_middleware as db
 
     if print_debug:
-        logger.info(f"Saving query/answer to history for notebook {notebook_id}")
+        debug_log(
+            "INFO",
+            "💾",
+            f"Saving query and answer to history for notebook {notebook_id}",
+        )
 
     # Save user message
     db.add_chat_message(
@@ -582,7 +912,7 @@ def save_answer_as_note(
     from middlewares import db_middleware as db
 
     if print_debug:
-        logger.info(f"Saving answer as note in notebook {notebook_id}")
+        debug_log("INFO", "📝", f"Saving answer as note in notebook {notebook_id}")
 
     db.add_note(
         notebook_id=notebook_id,
@@ -617,20 +947,22 @@ def get_source_vectorstore_dir(notebook_id: str, source_id: str) -> Path:
 def try_load_embeddings() -> Optional[HuggingFaceEmbeddings]:
     """Try to load embeddings with GPU, fallback to CPU on OOM."""
     try:
-        logger.info("🔳\tAttempting to load embeddings on GPU")
+        debug_log("INFO", "🔳", "Attempting to load embeddings on GPU...")
         return HuggingFaceEmbeddings(
             model_name=cfg.EMBEDDING_MODEL_NAME,
             model_kwargs={"device": "cuda"},
         )
     except Exception as e:
-        logger.warning(f"GPU loading failed: {e}. Falling back to CPU...")
+        debug_log("WARNING", "⚠️", f"GPU loading failed: {e}. Falling back to CPU...")
         try:
             return HuggingFaceEmbeddings(
                 model_name=cfg.EMBEDDING_MODEL_NAME,
                 model_kwargs={"device": "cpu"},
             )
         except Exception as e2:
-            logger.error(f"CPU loading also failed: {e2}")
+            debug_log(
+                "ERROR", "❌", f"CPU loading failed: {e2}. Embeddings cannot be loaded."
+            )
             return None
 
 
@@ -643,23 +975,34 @@ def retrieve_quality_chunks(
     print_debug: bool = False,
 ) -> List[Document]:
     """
-    Retrieve chunks with intelligent quality-based filtering.
+    Retrieve document chunks with quality-based filtering and fallback guarantees.
 
-    Uses similarity score threshold filtering first, then falls back to top K
-    results if threshold filtering doesn't return enough chunks.
-    This prevents missing relevant context while maintaining quality.
+    Uses L2 distance similarity scoring to filter chunks. If strict threshold filtering
+    returns fewer than min_results, falls back to returning top-K results without
+    threshold filtering to ensure the LLM always gets minimum context.
 
     Args:
-      vectorstore: FAISS vectorstore object
-      query: User's question
+        vectorstore: FAISS vectorstore containing indexed documents.
+        query: User's question to retrieve relevant chunks for.
+        k: Maximum number of chunks to retrieve.
+        min_results: Minimum guaranteed result count (triggers fallback if not met).
+        score_threshold: L2 distance threshold; lower scores = better matches.
+                        Typical range: 0.0-30.0 for multilingual embeddings.
+        print_debug: Enable detailed logging of retrieval process.
 
     Returns:
-      List of Document objects ranked by relevance
+        List[Document]: Ordered list of relevant document chunks with metadata including
+                       similarity_score and passed_quality_threshold flags.
+
+    Note:
+        L2 distance metric used by FAISS: lower distance = higher similarity.
+        Values typically range 4.0-6.0 for moderate semantic relevance.
     """
     if print_debug:
-        logger.info(f"🔎 Retrieving quality chunks from {k} total results")
-        logger.info(
-            f"   Quality threshold: {score_threshold}, Min fallback: {min_results}"
+        debug_log(
+            "INFO",
+            "🔎",
+            f"Retrieving quality chunks from {k} total results with the threshold of {score_threshold} and min fallback of {min_results}",
         )
 
     # Step 1: Get top K results with scores
@@ -668,7 +1011,7 @@ def retrieve_quality_chunks(
     )
 
     if print_debug:
-        logger.debug(f"   Total search results: {len(results_with_scores)}")
+        debug_log("INFO", None, f"Total search results: {len(results_with_scores)}")
 
     # Step 2: Filter by quality threshold (lower distance = better match)
     filtered_results: List[Document] = []
@@ -688,17 +1031,20 @@ def retrieve_quality_chunks(
             failed_threshold += 1
 
     if print_debug:
-        logger.info(
-            f"   ✅\tPassed threshold ({score_threshold}): {passed_threshold} chunks"
+        debug_log(
+            "INFO",
+            "✅",
+            f"Passed threshold ({score_threshold}): {passed_threshold} chunks",
         )
-        logger.info(f"   ❌\tFailed threshold: {failed_threshold} chunks")
+        debug_log("INFO", "❌", f"Failed threshold: {failed_threshold} chunks")
 
     # Step 3: Fallback mechanism - if threshold filtered too much, use top min_results
     if len(filtered_results) < min_results:
         if print_debug:
-            logger.warning(
-                f"   ⚠️\tOnly {len(filtered_results)} chunks passed threshold. "
-                f"Falling back to top {min_results} results..."
+            debug_log(
+                "WARNING",
+                "⚠️",
+                f"Only {len(filtered_results)} chunks passed threshold. Falling back to top {min_results} results...",
             )
 
         filtered_results = []
@@ -708,8 +1054,10 @@ def retrieve_quality_chunks(
             filtered_results.append(doc)
 
     if print_debug:
-        logger.info(f"   ✅\tFinal selection: {len(filtered_results)} chunks")
-        logger.info("   " + "━" * 60)
+        debug_log(
+            "INFO", "✅", f"Final retrieved chunks for display: {len(filtered_results)}"
+        )
+        print_breaker()
 
         for i, doc in enumerate(filtered_results, 1):
             doc_metadata: Dict[str, Any] = doc.metadata  # type: ignore[assignment]
@@ -726,12 +1074,13 @@ def retrieve_quality_chunks(
             content_preview = doc.page_content[:85].replace("\n", " ").strip()
             score_str = f"{score:.4f}" if isinstance(score, float) else str(score)
 
-            logger.info(
-                f"   📄\t[{i}] L2 Distance: {score_str} | {doc_name} (Page {page_num})"
+            debug_log(
+                "INFO",
+                "📄",
+                f'[{i}] L2 Distance: {score_str} | {doc_name} (Page {page_num}): "{content_preview}"...',
             )
-            logger.info(f'       "{content_preview}..."')
 
-        logger.info("   " + "━" * 60 + "\n")
+        print_breaker()
 
     return filtered_results
 
@@ -753,14 +1102,18 @@ def format_context_with_sources(
     """
     if not docs:
         if print_debug:
-            logger.debug("📄 No relevant context found to format.")
+            debug_log("INFO", "📄", "No relevant context found to format.")
         return "No relevant context found."
 
     context_parts: List[str] = []
     current_length = 0
 
     if print_debug:
-        logger.debug(f"📄 Formatting {len(docs)} chunks into context...")
+        debug_log(
+            "INFO",
+            "📄",
+            f"Formatting {len(docs)} chunks into context with max total length of {cfg.RAG_MAX_CTX_LEN} bytes...",
+        )
 
     for idx, doc in enumerate(docs, 1):
         metadata: dict[str, Any] = getattr(doc, "metadata", {})
@@ -778,9 +1131,10 @@ def format_context_with_sources(
         # Stop adding chunks if we exceed max total context length
         if current_length + part_length > cfg.RAG_MAX_CTX_LEN:
             if print_debug:
-                logger.debug(
-                    f"   ⚠️  Max context length reached. Stopping at chunk {idx - 1}. "
-                    f"(Current: {current_length}B, Limit: {cfg.RAG_MAX_CTX_LEN}B)"
+                debug_log(
+                    "WARNING",
+                    "⚠️",
+                    f"Max context length reached. Stopping at chunk {idx - 1}. (Current: {current_length}B, Limit: {cfg.RAG_MAX_CTX_LEN}B)",
                 )
             break
 
@@ -788,13 +1142,19 @@ def format_context_with_sources(
         current_length += part_length
 
         if print_debug:
-            logger.debug(
-                f"   📑 Chunk {idx}: Page {page_num} ({part_length}B, running total: {current_length}B)"
+            debug_log(
+                "INFO",
+                "📑",
+                f"Added chunk {idx}: Page {page_num} ({part_length}B, running total: {current_length}B)",
             )
 
     final_context = "\n\n".join(context_parts)
     if print_debug:
-        logger.debug(f"   ✅ Final context size: {len(final_context)}B")
+        debug_log(
+            "INFO",
+            "📄",
+            f"Final formatted context prepared with {len(context_parts)} chunks, total length: {len(final_context)} bytes",
+        )
 
     return final_context
 
@@ -862,8 +1222,10 @@ def load_persisted_vectorstore_filtered(
                 else:
                     merged_vs.merge_from(vs)
             except Exception as e:
-                logger.warning(
-                    f"Failed to load vectorstore for source {source_id}: {e}"
+                debug_log(
+                    "WARNING",
+                    "⚠️",
+                    f"Failed to load vectorstore for source {source_id}: {e}",
                 )
     return merged_vs
 
@@ -936,8 +1298,10 @@ def is_greeting(user_query: str) -> bool:
 
     except Exception as e:
         # If language detection fails, fall back to English patterns
-        logger.debug(
-            f"Language detection failed: {e}. Using English patterns as fallback."
+        debug_log(
+            "WARNING",
+            "⚠️",
+            f"Language detection failed: {e}. Using English patterns as fallback.",
         )
         for pattern in cfg.DEFAULT_EN_GREETING_PATTERNS:
             if re.match(pattern, query_lower):
@@ -979,47 +1343,202 @@ def create_history_aware_rag_chain(
     notebook_id: Optional[str] = None,
 ) -> Any:
     """
-    Build a history-aware RAG chain that can handle follow-up questions.
+    Build a production-ready history-aware RAG chain with hybrid search capability.
 
-    This chain:
-    1. Takes chat history and current question
-    2. Rephrases the question for standalone retrieval
-    3. Retrieves context from vectorstore
-    4. Generates answer with document context + general knowledge fallback
+    This is the core RAG orchestration function. It constructs a sophisticated pipeline that:
+    1. Uses chat history to rephrase questions for better retrieval
+    2. Implements a "Gatekeeper" pattern to choose Pure Semantic, Pure Keyword, or Hybrid search
+    3. Retrieves context with quality-based threshold filtering and fallback guarantees
+    4. Formats context with source citations
+    5. Generates answers using LLM with document context + general knowledge fallback
 
     Args:
-        vectorstore: FAISS vectorstore object
-        print_debug: Enable debug logging
-        notebook_id: The ID of the notebook for loading settings
+        vectorstore: FAISS vectorstore containing indexed documents.
+        print_debug: Enable detailed debug logging of chain execution.
+        notebook_id: UUID of the notebook for loading custom RAG settings.
 
     Returns:
-        Runnable chain that accepts {"input": question} and optional {"chat_history": [...]}
+        Any: Runnable RAG chain that accepts {"input": question, "chat_history": [...]} (optional)
+             and returns the final answer string.
+
+    Pipeline Flow:
+        Question + History → Rephrase → Quality Retriever → Context Formatter → Enhanced Prompt → LLM → Answer
+
+    Hybrid Search Modes (controlled by weight_semantic and weight_bm25 settings):
+        - Pure Semantic (weight_bm25 = 0.0): FAISS vector similarity only
+        - Pure Keyword (weight_semantic = 0.0): BM25 lexical matching only
+        - Hybrid (both > 0.0): EnsembleRetriever with RRF (Reciprocal Rank Fusion)
+
+    Note:
+        Uses Streamlit session_state to cache the expensive BM25 tokenizer.
+        Automatically invalidates cache when vectorstore content or notebook changes.
     """
     from langchain_core.output_parsers import StrOutputParser
     from langchain_ollama import OllamaLLM
     from langchain_core.prompts import MessagesPlaceholder
 
     if print_debug:
-        logger.info("\n\n🛠️\tBuilding History-Aware RAG Chain...")
+        print("\n")
+        debug_log("INFO", "🛠️", "Building History-Aware RAG Chain...")
 
     settings = _load_notebook_settings(notebook_id)
 
-    # Step 1: Create quality-based retriever
+    import streamlit as st
+    from langchain_core.retrievers import BaseRetriever
+    from langchain_core.callbacks import CallbackManagerForRetrieverRun
+    from pydantic import Field
+    from langchain_community.retrievers import BM25Retriever
+    from langchain_classic.retrievers import EnsembleRetriever
+
+    class CustomFAISSRetriever(BaseRetriever):
+        vectorstore: Any = Field(description="FAISS vectorstore")
+        settings_dict: Dict[str, Any] = Field(description="Settings dict")
+        print_debug: bool = Field(default=False)
+
+        def _get_relevant_documents(
+            self, query: str, *, run_manager: CallbackManagerForRetrieverRun
+        ) -> List[Document]:
+            return retrieve_quality_chunks(
+                self.vectorstore,
+                query,
+                k=int(self.settings_dict["rag_retrieval_k"]),
+                min_results=int(self.settings_dict["rag_retrieval_min_results"]),
+                score_threshold=float(
+                    self.settings_dict["rag_retrieval_score_threshold"]
+                ),
+                print_debug=self.print_debug,
+            )
+
+    # Step 1: Create hybrid/quality-based retriever implementations
+    k_val = int(settings["rag_retrieval_k"])
+    weight_semantic = float(settings.get("weight_semantic", cfg.WEIGHT_SEMANTIC))
+    weight_bm25 = float(settings.get("weight_bm25", cfg.WEIGHT_BM25))
+    min_results = int(settings["rag_retrieval_min_results"])
+
+    # Provide FAISS Semantic Base Retriever
+    faiss_retriever = CustomFAISSRetriever(
+        vectorstore=vectorstore, settings_dict=settings, print_debug=print_debug
+    )
+
+    # Build or Load BM25 Retriever from Streamlit Cache (The "Cold Start" Strategy)
+    current_doc_count = len(vectorstore.index_to_docstore_id)
+    current_vs_id = id(vectorstore)
+
+    rebuild_bm25 = (
+        "bm25_retriever" not in st.session_state
+        or st.session_state.get("bm25_doc_count") != current_doc_count
+        or st.session_state.get("bm25_vs_id") != current_vs_id
+        or st.session_state.get("bm25_notebook_id") != notebook_id
+    )
+
+    if rebuild_bm25:
+        if print_debug:
+            debug_log(
+                "INFO", "⚙️", "Building/Rebuilding BM25Retriever from FAISS docstore..."
+            )
+        all_docs_ids = vectorstore.index_to_docstore_id.values()
+        all_docs = [
+            doc
+            for doc_id in all_docs_ids
+            if isinstance((doc := vectorstore.docstore.search(doc_id)), Document)
+        ]
+        if len(all_docs) > 0:
+            bm25 = BM25Retriever.from_documents(all_docs)
+            bm25.k = k_val
+            st.session_state["bm25_retriever"] = bm25
+        else:
+            st.session_state["bm25_retriever"] = None
+
+        st.session_state["bm25_doc_count"] = current_doc_count
+        st.session_state["bm25_vs_id"] = current_vs_id
+        st.session_state["bm25_notebook_id"] = notebook_id
+
+    bm25_retriever = st.session_state.get("bm25_retriever")
+    if bm25_retriever:
+        bm25_retriever.k = k_val  # update k dynamically to user settings
+
+    # The Gatekeeper Architectural Flow
+    hybrid_retriever: Any = None
+    if bm25_retriever is None or abs(weight_bm25) < 1e-5:
+        if print_debug:
+            debug_log(
+                "INFO",
+                "🧩",
+                f"Initialized Pure Semantic Mode (Weight Semantic={weight_semantic:.2f} / Weight BM25=0.00)",
+            )
+        hybrid_retriever = faiss_retriever
+    elif abs(weight_semantic) < 1e-5:
+        if print_debug:
+            debug_log(
+                "INFO",
+                "🧩",
+                f"Initialized Pure Keyword Mode (Weight Semantic=0.00 / Weight BM25={weight_bm25:.2f})",
+            )
+        hybrid_retriever = bm25_retriever
+    else:
+        if print_debug:
+            debug_log(
+                "INFO",
+                "🧩",
+                f"Initialized Hybrid Ensemble Mode (Weight Semantic={weight_semantic:.2f} / Weight BM25={weight_bm25:.2f})",
+            )
+        hybrid_retriever = EnsembleRetriever(
+            retrievers=[faiss_retriever, bm25_retriever],
+            weights=[weight_semantic, weight_bm25],
+            c=cfg.RRF_C,
+        )
+
     def quality_retriever(query: str) -> List[Document]:
         if print_debug:
-            logger.info("   " + "━" * 60)
-            logger.info("   🔍\tFinal Search Query (After History Rephrasing): ")
-            logger.info(f"      '{query}'")
-            logger.info("   " + "━" * 60)
+            print_breaker()
+            debug_log("INFO", "🔍", f'Executing retrieval with query: "{query}"')
+            if bm25_retriever is None or abs(weight_bm25) < 1e-5:
+                debug_log(
+                    "INFO",
+                    "🧩",
+                    f"Executing Pure Semantic Search (Weight Semantic: {weight_semantic:.2f} / Weight BM25: 0.00)",
+                )
+            elif abs(weight_semantic) < 1e-5:
+                debug_log(
+                    "INFO",
+                    "🧩",
+                    f"Executing Pure Keyword Search (Weight Semantic: 0.00 / Weight BM25: {weight_bm25:.2f})",
+                )
+            else:
+                debug_log(
+                    "INFO",
+                    "🧩",
+                    f"Executing Hybrid Ensemble Search (Weight Semantic: {weight_semantic:.2f} / Weight BM25: {weight_bm25:.2f})",
+                )
+            print_breaker()
 
-        return retrieve_quality_chunks(
-            vectorstore,
-            query,
-            k=int(settings["rag_retrieval_k"]),
-            min_results=int(settings["rag_retrieval_min_results"]),
-            score_threshold=float(settings["rag_retrieval_score_threshold"]),
-            print_debug=print_debug,
-        )
+        docs: List[Document] = hybrid_retriever.invoke(query)
+
+        # Enforce exact top_k limit because EnsembleRetriever fuses lists and might return 2 * k elements
+        if len(docs) > k_val:
+            docs = docs[:k_val]
+
+        # Fallback & Min Guarantee logic
+        if len(docs) < min_results:
+            if print_debug:
+                debug_log(
+                    "WARNING",
+                    "⚠️",
+                    f"Hybrid/Keyword Search returned {len(docs)} chunks. Triggering Fallback to Pure Semantic Search with relaxed threshold to guarantee at least {min_results} results.",
+                )
+
+            # Lower score threshold or run pure similarity
+            fallback_docs = retrieve_quality_chunks(
+                vectorstore,
+                query,
+                k=min_results,
+                min_results=min_results,
+                score_threshold=100.0,
+                print_debug=print_debug,
+            )
+            return fallback_docs
+
+        return docs
 
     # Step 2: Initialize LLM
     llm = OllamaLLM(
@@ -1127,9 +1646,7 @@ def create_history_aware_rag_chain(
         rephrased_q = str(x.get("rephrased_question", ""))
 
         if print_debug and current_question != rephrased_q:
-            logger.info("   " + "━" * 60)
-            logger.info(f"   🧠\tContextual Question Formed: '{rephrased_q}'")
-            logger.info("   " + "━" * 60)
+            debug_log("INFO", "🧠", f'Contextual Question Formed: "{rephrased_q}"')
 
         # Ensure we don't accidentally drop the is_greeting flag or other metadata
         return {
@@ -1152,9 +1669,10 @@ def create_history_aware_rag_chain(
     )
 
     if print_debug:
-        logger.info("🚀\tAdvanced RAG Chain created!")
-        logger.info(
-            "🌊\tChain Flow: Question + History → Rephrase → Quality Retriever → Context Formatter → Enhanced Prompt → LLM → Answer"
+        debug_log(
+            "INFO",
+            "🚀",
+            "Advanced RAG Chain created: Question + History → Rephrase → Quality Retriever → Context Formatter → Enhanced Prompt → LLM → Answer",
         )
 
     return rag_chain

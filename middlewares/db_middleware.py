@@ -249,6 +249,7 @@ def upsert_notebook_settings(notebook_id: str, settings: Dict[str, Any]) -> None
         "max_msg_history": (cfg.MAX_MSG_HISTORY_MIN, cfg.MAX_MSG_HISTORY_MAX),
         "llm_num_ctx": (cfg.LLM_NUM_CTX_MIN, cfg.LLM_NUM_CTX_MAX),
         "llm_temp": (cfg.LLM_TEMPERATURE_MIN, cfg.LLM_TEMPERATURE_MAX),
+        "weight_semantic": (cfg.WEIGHT_SEMANTIC_MIN, cfg.WEIGHT_SEMANTIC_MAX),
     }
 
     # 2. Iterate and Validate
