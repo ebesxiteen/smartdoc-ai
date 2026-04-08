@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [Unreleased]
+## [v1.1.0] - 2026-04-08
 
 ### Added
 
@@ -235,5 +235,5 @@ None
 
 ---
 
-[Unreleased]: https://github.com/dungtq2k5/smartdoc-ai/compare/v1.0.0...HEAD
+[1.1.0]: https://github.com/dungtq2k5/smartdoc-ai/compare/v1.0.0...1.1.0
 [1.0.0]: https://github.com/dungtq2k5/smartdoc-ai/releases/tag/v1.0.0
