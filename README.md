@@ -8,7 +8,7 @@
 
 - **⚙️ Notebook Settings**: Customize memory, retrieval count, score thresholds, and prompts independently per notebook natively via UI.
 - **📚 Document Hub**: Manage PDF and Word documents, track real-time hardware status (RAM/VRAM), and configure intelligent settings with hardware-aware warnings.
-- **🔍 Semantic Search**: Intelligently retrieve the most relevant document sections using FAISS vector embeddings
+- **🔍 Hybrid Search**: Intelligently retrieve relevant document sections using combined semantic search (FAISS embeddings) and BM25 full-text search with configurable weighting.
 - **🤖 Grounded AI Responses**: Get answers strictly based on your documents with automatic source citations
 - **🌐 Multi-language Support**: Ask questions in Vietnamese, English, or other languages and receive answers in your preferred language
 - **💾 Persistent Storage**: All documents, chat history, and notes are saved to a local SQLite database
@@ -121,9 +121,11 @@ All tunable parameters are centralized in [core/configs.py](./core/configs.py):
 
 ```python
 # RAG Tuning (adjust for inference quality vs speed)
-RAG_RETRIEVAL_K: int = 8         # Top K chunks to retrieve
+RAG_RETRIEVAL_K: int = 8                     # Top K chunks to retrieve
 RAG_RETRIEVAL_SCORE_THRESHOLD: float = 1.0  # Euclidean distance (0.0 to 2.0); Lower = stricter filtering
 RAG_MAX_CTX_LEN: int = RAG_RETRIEVAL_K * 1000 # Characters sent to LLM
+WEIGHT_SEMANTIC: float = 0.5                 # Hybrid search: semantic vs keyword balance
+WEIGHT_BM25: float = 0.5                     # BM25 weight (keyword match)
 
 # LLM Setup
 OLLAMA_BASE_URL = "http://localhost:11434"  # Ollama server

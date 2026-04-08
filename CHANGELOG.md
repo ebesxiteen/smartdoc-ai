@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Hybrid Search**: Implemented a hybrid search approach combining semantic search (FAISS) and keyword search (BM25) with configurable `semantic_weight` and `bm25_weight` parameters to optimize retrieval accuracy.
+- **Structured Debug Logging**: Enhanced internal debug logging to use a consistent, structured category-based format.
+- **Comprehensive Documentation Suite**: Added comprehensive docstrings to all functions in `app.py` and `core/utils.py` and updated existing internal templates and logging guides.
 - **Local Hardware Dashboard**: Display local machine hardware capabilities (RAM, VRAM, OS, CPU, GPU) in the `Source Hub` section.
 - **Hardware-Aware Warnings**: Added intelligent warning messages based on local machine hardware limitations when configuring notebook settings (e.g., warning if trying to load a massive model on limited VRAM).
 - **Word Document Support**: Upload and process `.docx` files alongside PDFs.
@@ -20,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Toast Messages Styling**: Added visually appealing emojis to Streamlit toast messages for better user feedback and styling.
 - **Personal Context Setting**: Renamed `notebook_setting.sys_prompt_override` to `personal_ctx` for better clarity in the codebase and UI.
 - **Settings Save Optimization**: Re-engineered the 'Apply Settings' logic to selectively update system state, minimizing unnecessary RAG pipeline reloads.
 - **RAG Pipeline Conversational Memory**: Rebuilt the LangChain pipeline to natively ingest `chat_message_history`, allowing the LLM to understand contextual follow-up questions while cleanly bypassing FAISS retrieval for standard greetings.
@@ -34,7 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **FAISS Score Threshold Range**: Fixed the `RAG_RETRIEVAL_SCORE_THRESHOLD` input constraints to properly restrict values between `0.0` and `2.0` (valid bounds for FAISS Euclidean distance search).
+- **FAISS Score Threshold Range**: Fixed the `RAG_RETRIEVAL_SCORE_THRESHOLD` input constraints to properly restrict values between `0.0` and `Infinity` (valid bounds for FAISS Euclidean distance search).
 - **Settings UI Reset UX**: Resolved an issue where Streamlit's slider and input components failed to auto-reset to DB values when the user clicked 'Reset to Default'.
 - **Ghost Toasts Fix**: Fixed missing toast success messages when a user clicked 'Reset to Default' or 'Apply Settings' due to backend execution halts (`st.rerun()`).
 - **Production Logging Noise**: Added missing `print_debug` condition checks to various debug logs in `app.py` to prevent stdout cluttering in production.
