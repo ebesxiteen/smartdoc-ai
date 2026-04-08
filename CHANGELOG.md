@@ -23,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **UI Theme Adaptation**: Refactored the app's CSS to remove hardcoded color values and instead utilize Streamlit's built-in theme variables, ensuring proper display in both light and dark modes without UI elements becoming invisible.
+- **Saved Notes Section**: Moved the `Saved Notes` section into a collapsible expander within the sidebar to improve organization and user experience, allowing users to easily access their notes without taking up constant space in the main content area.
 - **Toast Messages Styling**: Added visually appealing emojis to Streamlit toast messages for better user feedback and styling.
 - **Personal Context Setting**: Renamed `notebook_setting.sys_prompt_override` to `personal_ctx` for better clarity in the codebase and UI.
 - **Settings Save Optimization**: Re-engineered the 'Apply Settings' logic to selectively update system state, minimizing unnecessary RAG pipeline reloads.
