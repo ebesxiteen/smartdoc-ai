@@ -70,15 +70,14 @@ st.markdown(
     }
     /* The track (background) of the progress bar */
     div[data-testid="stProgress"] > div > div {
-        background-color: #cccccc !important;
+        background-color: rgba(128, 128, 128, 0.2) !important;
     }
     /* The filled portion of the progress bar */
     div[data-testid="stProgress"] > div > div > div > div {
-        background-color: #000000 !important;
+        background-color: var(--primary-color) !important;
     }
     .progress-status-text {
         font-size: 0.9rem;
-        color: #444444;
         margin-bottom: 5px;
         font-weight: 500;
     }
@@ -98,29 +97,28 @@ st.markdown(
         font-weight: 600;
         margin-bottom: 0.3em;
         margin-top: 0em;
-        color: #111111;
     }
 
     .source-citation {
-        background-color: #f8f8f8;
+        background-color: rgba(128, 128, 128, 0.05) !important;
         padding: 0.8em;
-        border-left: 4px solid #333333;
+        border-left: 4px solid var(--primary-color);
         border-radius: 4px;
         margin: 0.5em 0;
         font-size: 0.85em;
     }
 
     .saved-note {
-        background-color: #fff9e6;
+        background-color: rgba(255, 165, 0, 0.1) !important;
         padding: 0.8em;
-        border-left: 4px solid #ffa500;
+        border-left: 4px solid var(--primary-color);
         border-radius: 4px;
         margin: 0.4em 0;
         font-size: 0.85em;
     }
 
     .error-box {
-        background-color: #ffe6e6;
+        background-color: rgba(204, 0, 0, 0.1) !important;
         padding: 0.8em;
         border-left: 4px solid #cc0000;
         border-radius: 4px;
@@ -135,22 +133,10 @@ st.markdown(
 
     /* Assistant styling customization */
     div[data-testid="stChatMessage"]:not(:has(svg[title="user"])) div[data-testid="stChatMessageContent"] {
-        background-color: #f5f5f5;
+        background-color: rgba(128, 128, 128, 0.05) !important;
         border-radius: 5px 15px 15px 15px;
         padding: 10px 15px;
-        border: 1px solid #ddd;
-    }
-
-    /* Black buttons with white text (Streamlit 1.45+ uses stBaseButton-{type}) */
-    button[data-testid="stBaseButton-primary"] {
-        background-color: black !important;
-        color: #ffffff !important;
-        border: 1px solid black !important;
-    }
-
-    button[data-testid="stBaseButton-primary"]:hover {
-        background-color: #333333 !important;
-        border-color: #333333 !important;
+        border: 1px solid rgba(128, 128, 128, 0.2);
     }
 
     /* Hide the ⋮ dots icon (1st svg) on popover trigger buttons, keep the arrow */
@@ -171,7 +157,7 @@ st.markdown(
         background: transparent !important;
         border: none !important;
         box-shadow: none !important;
-        color: #555 !important;
+        opacity: 0.8;
         text-decoration: underline !important;
         white-space: nowrap !important;
         font-size: 0.85rem !important;
@@ -180,7 +166,7 @@ st.markdown(
     section[data-testid="stSidebar"]
     [data-testid="stHorizontalBlock"]:has(> [data-testid="stColumn"]:nth-child(3))
     [data-testid="stColumn"]:nth-child(n+2) button:hover {
-        color: #000 !important;
+        opacity: 1;
         background: transparent !important;
     }
 
@@ -196,17 +182,17 @@ st.markdown(
        at the top of each section function. :has() only matches the top-level
        stColumn that directly contains the marker, not nested inner columns. */
     [data-testid="stColumn"]:has(.source-hub-bg) {
-        background-color: #f0f4f9;
+        background-color: rgba(128, 128, 128, 0.05) !important;
         border-radius: 10px;
         padding: 0.75rem !important;
     }
     [data-testid="stColumn"]:has(.chat-section-bg) {
-        background-color: #f9f9fb;
+        background-color: rgba(128, 128, 128, 0.03) !important;
         border-radius: 10px;
         padding: 0.75rem !important;
     }
     [data-testid="stColumn"]:has(.notes-panel-bg) {
-        background-color: #f4faf2;
+        background-color: rgba(128, 128, 128, 0.05) !important;
         border-radius: 10px;
         padding: 0.75rem !important;
         position: relative !important;
@@ -354,6 +340,9 @@ def initialize_session_state():
 
     if "rename_source_modal_open" not in st.session_state:
         st.session_state.rename_source_modal_open = False
+
+    if "show_notes_panel" not in st.session_state:
+        st.session_state.show_notes_panel = False
 
     if "rename_source_id" not in st.session_state:
         st.session_state.rename_source_id = None
@@ -834,10 +823,10 @@ def source_hub_ui(print_debug: bool = False) -> None:
                             file_list_html += f"<div style='color: green; font-size: 0.85em; margin-bottom: 2px;'>✨ {fname_iter}</div>"
                         elif j == i:
                             # Currently processing
-                            file_list_html += f"<div style='color: black; font-weight: 500; font-size: 0.85em; margin-bottom: 2px;'>🚀 {fname_iter} <br><span style='font-size: 0.9em; font-weight: normal; color: #444; margin-left: 15px;'>↳ <i>{status_message}</i></span></div>"
+                            file_list_html += f"<div style='color: var(--text-color); font-weight: 500; font-size: 0.85em; margin-bottom: 2px;'>🚀 {fname_iter} <br><span style='font-size: 0.9em; font-weight: normal; margin-left: 15px; opacity: 0.8;'>↳ <i>{status_message}</i></span></div>"
                         else:
                             # Pending
-                            file_list_html += f"<div style='color: #999; font-size: 0.85em; margin-bottom: 2px;'>⚡ {fname_iter}</div>"
+                            file_list_html += f"<div style='color: gray; font-size: 0.85em; margin-bottom: 2px;'>⚡ {fname_iter}</div>"
 
                     status_text.markdown(
                         f"<div class='progress-status-text' style='margin-bottom: 10px;'><b>Processing {num_files} files:</b><br>{file_list_html}</div>",
@@ -1216,7 +1205,7 @@ def render_user_message(content: str) -> None:
     st.markdown(
         f"""
         <div style="display: flex; justify-content: flex-end; margin-bottom: 0.5rem; width: 100%;">
-            <div style="background-color: #f0f0f0; color: #111; padding: 0.6rem 1rem; border-radius: 15px 5px 15px 15px; border: 1px solid #ddd; max-width: 80%; text-align: left; box-shadow: 0 1px 2px rgba(0,0,0,0.05); font-family: sans-serif; font-size: 0.95em;">
+            <div style="background-color: var(--secondary-background-color); color: var(--text-color); padding: 0.6rem 1rem; border-radius: 15px 5px 15px 15px; border: 1px solid rgba(128, 128, 128, 0.2); max-width: 80%; text-align: left; box-shadow: 0 1px 2px rgba(0,0,0,0.05); font-family: sans-serif; font-size: 0.95em;">
                 {escaped_content}
             </div>
         </div>
@@ -1253,7 +1242,15 @@ def chat_interface(notebook_name: str, print_debug: bool = False) -> None:
     with col2:
         with st.popover("⋮", use_container_width=False):
             if st.button(
-                "Delete chat history",
+                "Toggle Notes",
+                key="toggle_right_sidebar",
+                use_container_width=True,
+            ):
+                st.session_state.show_notes_panel = not st.session_state.show_notes_panel
+                st.rerun()
+
+            if st.button(
+                "Delete history",
                 key=f"clear_chat_{st.session_state.current_notebook_id}",
                 type="secondary",
                 use_container_width=True,
@@ -1623,7 +1620,7 @@ def notes_panel_ui() -> None:
     with col_count:
         note_count = len(st.session_state.saved_notes)
         if note_count:
-            st.caption(f"{note_count} note{'s' if note_count != 1 else ''}")
+            st.caption(f"{note_count}")
 
     # Fixed-height scroll area — match the exact Chat column height so "Add Note" stays pinned nicely at the bottom
     with st.container(height=580, border=False):
@@ -2416,17 +2413,27 @@ def main() -> None:
         ):
             show_rename_source_dialog()
 
-        # Split layout into 3 sections (Source Hub | Chat | Notes)
-        col1, col2, col3 = st.columns([1.2, 2.8, 1.2])
+        if st.session_state.show_notes_panel:
+            # Split layout into 3 sections (Source Hub | Chat | Notes)
+            col1, col2, col3 = st.columns([1.2, 2.6, 1.2])
 
-        with col1:
-            source_hub_ui(cfg.PRINT_DEBUG)
+            with col1:
+                source_hub_ui(cfg.PRINT_DEBUG)
 
-        with col2:
-            chat_interface(notebook_name, cfg.PRINT_DEBUG)
+            with col2:
+                chat_interface(notebook_name, cfg.PRINT_DEBUG)
 
-        with col3:
-            notes_panel_ui()
+            with col3:
+                notes_panel_ui()
+        else:
+            # Split layout into 2 sections (Source Hub | Chat)
+            col1, col2 = st.columns([1.2, 3.8])
+
+            with col1:
+                source_hub_ui(cfg.PRINT_DEBUG)
+
+            with col2:
+                chat_interface(notebook_name, cfg.PRINT_DEBUG)
 
 
 if __name__ == "__main__":
