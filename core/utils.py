@@ -6,7 +6,7 @@ Includes: PDF processing, chat handling, vectorstore management, and text cleani
 from datetime import datetime, timezone
 import hashlib
 import uuid
-from typing import Any, Dict, List, Optional, Set, Tuple, Callable
+from typing import Any, Dict, List, cast, Optional, Set, Tuple, Callable
 import logging
 
 import streamlit as st
@@ -77,7 +77,7 @@ def get_system_hardware_info() -> Dict[str, Any]:
             total_memory_bytes = getattr(props, "total_memory", 0)
             total_vram_gb = round(int(total_memory_bytes) / (1024**3), 1)
     except Exception as e:
-        debug_log("WARN", message=f"GPU detection failed: {e}")
+        debug_log("WARNING", message=f"GPU detection failed: {e}")
 
     return {
         "os": os_name,
@@ -98,7 +98,8 @@ def get_default_notebook_settings() -> Dict[str, Any]:
 
     Returns:
         Dict[str, Any]: Default settings dictionary with keys:
-            - rag_retrieval_k (int): Number of top chunks to retrieve
+            - rag_final_context_k (int): Number of top chunks to retrieve
+            - rag_rerank_top_n (int): Number of chunks to rerank with Cross-Encoder
             - rag_retrieval_min_results (int): Minimum guaranteed results
             - rag_retrieval_score_threshold (float): Similarity score threshold
             - rag_max_chunk_len (int): Maximum chunk size in characters
@@ -116,7 +117,8 @@ def get_default_notebook_settings() -> Dict[str, Any]:
         All values are loaded from core/configs.py. Modify settings there to change defaults.
     """
     return {
-        "rag_retrieval_k": cfg.RAG_RETRIEVAL_K,
+        "rag_final_context_k": cfg.RAG_FINAL_CONTEXT_K,
+        "rag_rerank_top_n": cfg.RAG_RERANK_TOP_N,
         "rag_retrieval_min_results": cfg.RAG_RETRIEVAL_MIN_RESULTS,
         "rag_retrieval_score_threshold": cfg.RAG_RETRIEVAL_SCORE_THRESHOLD,
         "rag_max_chunk_len": cfg.RAG_MAX_CHUNK_LEN,
@@ -166,7 +168,8 @@ def _load_notebook_settings(
         return defaults
 
     return {
-        "rag_retrieval_k": settings.get("rag_retrieval_k"),
+        "rag_final_context_k": settings.get("rag_final_context_k"),
+        "rag_rerank_top_n": settings.get("rag_rerank_top_n"),
         "rag_retrieval_min_results": settings.get("rag_retrieval_min_results"),
         "rag_retrieval_score_threshold": settings.get("rag_retrieval_score_threshold"),
         "rag_max_chunk_len": settings.get("rag_max_chunk_len"),
@@ -177,8 +180,8 @@ def _load_notebook_settings(
         "llm_num_ctx": settings.get("llm_num_ctx"),
         "llm_temp": settings.get("llm_temp"),
         "personal_ctx": settings.get("personal_ctx"),
-        "weight_semantic": settings.get("weight_semantic", cfg.WEIGHT_SEMANTIC),
-        "weight_bm25": settings.get("weight_bm25", cfg.WEIGHT_BM25),
+        "weight_semantic": settings.get("weight_semantic"),
+        "weight_bm25": settings.get("weight_bm25"),
     }
 
 
@@ -260,7 +263,7 @@ def debug_log(
     Example:
         >>> debug_log("SUCCESS", "✅", "File loaded successfully")
         >>> debug_log("KEYWORD", message="Using BM25 keyword search")
-        >>> debug_log("WARN", message="Threshold not met, using fallback")
+        >>> debug_log("WARNING", message="Threshold not met, using fallback")
     """
     import inspect
     import os
@@ -773,9 +776,9 @@ def process_user_query(
                 # To prevent overwhelming logs, limit to first 10 lines max or 1000 chars
                 if idx > 9 or len(line) > 150:
                     preview = line[:150] + "..." if len(line) > 150 else line
-                    debug_log("INFO", None, f"{preview}")
+                    debug_log("INFO", message=f"{preview}")
                 else:
-                    debug_log("INFO", None, f"{line}")
+                    debug_log("INFO", message=f"{line}")
         print_breaker()
 
     # Step 4: Parse [STATUS: DOC_ANSWER/DOC_MISSING/GENERAL] tag from answer
@@ -836,7 +839,7 @@ def process_user_query(
             source_docs = retrieve_quality_chunks(
                 vectorstore,
                 query,
-                k=settings["rag_retrieval_k"],
+                k=settings["rag_final_context_k"],
                 min_results=settings["rag_retrieval_min_results"],
                 score_threshold=settings["rag_retrieval_score_threshold"],
                 print_debug=print_debug,
@@ -858,8 +861,7 @@ def process_user_query(
             if print_debug:
                 debug_log(
                     "INFO",
-                    None,
-                    f"• Source {i}: {source_entry['document']} (Page {source_entry['page']})",
+                    message=f"• Source {i}: {source_entry['document']} (Page {source_entry['page']})",
                 )
 
         if print_debug:
@@ -953,7 +955,7 @@ def try_load_embeddings() -> Optional[HuggingFaceEmbeddings]:
             model_kwargs={"device": "cuda"},
         )
     except Exception as e:
-        debug_log("WARNING", "⚠️", f"GPU loading failed: {e}. Falling back to CPU...")
+        debug_log("WARNING", message=f"GPU loading failed: {e}. Falling back to CPU...")
         try:
             return HuggingFaceEmbeddings(
                 model_name=cfg.EMBEDDING_MODEL_NAME,
@@ -961,7 +963,32 @@ def try_load_embeddings() -> Optional[HuggingFaceEmbeddings]:
             )
         except Exception as e2:
             debug_log(
-                "ERROR", "❌", f"CPU loading failed: {e2}. Embeddings cannot be loaded."
+                "ERROR",
+                message=f"CPU loading failed: {e2}. Embeddings cannot be loaded.",
+            )
+            return None
+
+
+@st.cache_resource(show_spinner=False)
+def try_load_cross_encoder() -> Any:
+    """Try to load the Cross-Encoder model with GPU fallback to CPU."""
+    try:
+        from sentence_transformers import CrossEncoder
+    except ImportError:
+        debug_log("ERROR", message="sentence-transformers library not found.")
+        return None
+
+    try:
+        debug_log("INFO", "🔳", "Attempting to load Cross-Encoder on GPU...")
+        return CrossEncoder(cfg.CROSS_ENCODER_MODEL_NAME, device="cuda")
+    except Exception as e:
+        debug_log("WARNING", message=f"GPU loading failed: {e}. Falling back to CPU...")
+        try:
+            return CrossEncoder(cfg.CROSS_ENCODER_MODEL_NAME, device="cpu")
+        except Exception as e2:
+            debug_log(
+                "ERROR",
+                message=f"CPU loading failed: {e2}. Cross-Encoder cannot be loaded.",
             )
             return None
 
@@ -969,7 +996,7 @@ def try_load_embeddings() -> Optional[HuggingFaceEmbeddings]:
 def retrieve_quality_chunks(
     vectorstore: FAISS,
     query: str,
-    k: int = cfg.RAG_RETRIEVAL_K,
+    k: int = cfg.RAG_FINAL_CONTEXT_K,
     min_results: int = cfg.RAG_RETRIEVAL_MIN_RESULTS,
     score_threshold: float = cfg.RAG_RETRIEVAL_SCORE_THRESHOLD,
     print_debug: bool = False,
@@ -1011,7 +1038,7 @@ def retrieve_quality_chunks(
     )
 
     if print_debug:
-        debug_log("INFO", None, f"Total search results: {len(results_with_scores)}")
+        debug_log("INFO", message=f"Total search results: {len(results_with_scores)}")
 
     # Step 2: Filter by quality threshold (lower distance = better match)
     filtered_results: List[Document] = []
@@ -1043,8 +1070,7 @@ def retrieve_quality_chunks(
         if print_debug:
             debug_log(
                 "WARNING",
-                "⚠️",
-                f"Only {len(filtered_results)} chunks passed threshold. Falling back to top {min_results} results...",
+                message=f"Only {len(filtered_results)} chunks passed threshold. Falling back to top {min_results} results...",
             )
 
         filtered_results = []
@@ -1133,8 +1159,7 @@ def format_context_with_sources(
             if print_debug:
                 debug_log(
                     "WARNING",
-                    "⚠️",
-                    f"Max context length reached. Stopping at chunk {idx - 1}. (Current: {current_length}B, Limit: {cfg.RAG_MAX_CTX_LEN}B)",
+                    message=f"Max context length reached. Stopping at chunk {idx - 1}. (Current: {current_length}B, Limit: {cfg.RAG_MAX_CTX_LEN}B)",
                 )
             break
 
@@ -1224,8 +1249,7 @@ def load_persisted_vectorstore_filtered(
             except Exception as e:
                 debug_log(
                     "WARNING",
-                    "⚠️",
-                    f"Failed to load vectorstore for source {source_id}: {e}",
+                    message=f"Failed to load vectorstore for source {source_id}: {e}",
                 )
     return merged_vs
 
@@ -1300,8 +1324,7 @@ def is_greeting(user_query: str) -> bool:
         # If language detection fails, fall back to English patterns
         debug_log(
             "WARNING",
-            "⚠️",
-            f"Language detection failed: {e}. Using English patterns as fallback.",
+            message=f"Language detection failed: {e}. Using English patterns as fallback.",
         )
         for pattern in cfg.DEFAULT_EN_GREETING_PATTERNS:
             if re.match(pattern, query_lower):
@@ -1376,19 +1399,18 @@ def create_history_aware_rag_chain(
     from langchain_core.output_parsers import StrOutputParser
     from langchain_ollama import OllamaLLM
     from langchain_core.prompts import MessagesPlaceholder
-
-    if print_debug:
-        print("\n")
-        debug_log("INFO", "🛠️", "Building History-Aware RAG Chain...")
-
-    settings = _load_notebook_settings(notebook_id)
-
     import streamlit as st
     from langchain_core.retrievers import BaseRetriever
     from langchain_core.callbacks import CallbackManagerForRetrieverRun
     from pydantic import Field
     from langchain_community.retrievers import BM25Retriever
     from langchain_classic.retrievers import EnsembleRetriever
+
+    if print_debug:
+        print("\n")
+        debug_log("INFO", "🛠️", "Building History-Aware RAG Chain...")
+
+    settings = _load_notebook_settings(notebook_id)
 
     class CustomFAISSRetriever(BaseRetriever):
         vectorstore: Any = Field(description="FAISS vectorstore")
@@ -1401,7 +1423,7 @@ def create_history_aware_rag_chain(
             return retrieve_quality_chunks(
                 self.vectorstore,
                 query,
-                k=int(self.settings_dict["rag_retrieval_k"]),
+                k=int(self.settings_dict["rag_rerank_top_n"]),
                 min_results=int(self.settings_dict["rag_retrieval_min_results"]),
                 score_threshold=float(
                     self.settings_dict["rag_retrieval_score_threshold"]
@@ -1410,9 +1432,10 @@ def create_history_aware_rag_chain(
             )
 
     # Step 1: Create hybrid/quality-based retriever implementations
-    k_val = int(settings["rag_retrieval_k"])
-    weight_semantic = float(settings.get("weight_semantic", cfg.WEIGHT_SEMANTIC))
-    weight_bm25 = float(settings.get("weight_bm25", cfg.WEIGHT_BM25))
+    k_val = int(settings["rag_final_context_k"])
+    rerank_n = int(settings["rag_rerank_top_n"])
+    weight_semantic = float(settings["weight_semantic"])
+    weight_bm25 = float(settings["weight_bm25"])
     min_results = int(settings["rag_retrieval_min_results"])
 
     # Provide FAISS Semantic Base Retriever
@@ -1444,7 +1467,7 @@ def create_history_aware_rag_chain(
         ]
         if len(all_docs) > 0:
             bm25 = BM25Retriever.from_documents(all_docs)
-            bm25.k = k_val
+            bm25.k = rerank_n
             st.session_state["bm25_retriever"] = bm25
         else:
             st.session_state["bm25_retriever"] = None
@@ -1455,7 +1478,7 @@ def create_history_aware_rag_chain(
 
     bm25_retriever = st.session_state.get("bm25_retriever")
     if bm25_retriever:
-        bm25_retriever.k = k_val  # update k dynamically to user settings
+        bm25_retriever.k = rerank_n  # update k dynamically to user settings
 
     # The Gatekeeper Architectural Flow
     hybrid_retriever: Any = None
@@ -1514,17 +1537,70 @@ def create_history_aware_rag_chain(
 
         docs: List[Document] = hybrid_retriever.invoke(query)
 
-        # Enforce exact top_k limit because EnsembleRetriever fuses lists and might return 2 * k elements
+        # Enforce exact top_k limit because EnsembleRetriever fuses lists and might return 2 * rerank_n elements
+        if len(docs) > rerank_n:
+            docs = docs[:rerank_n]
+
+        # Stage 2: Cross-Encoder Re-ranking
         if len(docs) > k_val:
-            docs = docs[:k_val]
+            cross_encoder = try_load_cross_encoder()
+            if cross_encoder:
+                if print_debug:
+                    debug_log(
+                        "INFO",
+                        "🧠",
+                        f"Re-ranking {len(docs)} chunks with Cross-Encoder...",
+                    )
+
+                # Create query-chunk pairs
+                pairs = [[query, doc.page_content] for doc in docs]
+
+                # Get and assign scores
+                scores = cross_encoder.predict(pairs)
+                for doc, score in zip(docs, scores):
+                    meta: Dict[str, Any] = getattr(doc, "metadata")
+                    meta["cross_encoder_score"] = float(score)
+
+                # Sort documents by cross_encoder_score descending
+                docs.sort(
+                    key=lambda d: float(
+                        cast(Dict[str, Any], getattr(d, "metadata")).get(
+                            "cross_encoder_score", -999.0
+                        )
+                    ),
+                    reverse=True,
+                )
+
+                # Truncate to final context K
+                docs = docs[:k_val]
+
+                if print_debug:
+                    debug_log(
+                        "INFO",
+                        "✅",
+                        f"Re-ranking complete. Sliced down to top {k_val} chunks.",
+                    )
+            else:
+                if print_debug:
+                    debug_log(
+                        "WARNING",
+                        message="Cross-Encoder model is not available. Falling back to Stage 1 results.",
+                    )
+                docs = docs[:k_val]
+        else:
+            if print_debug and len(docs) > 0:
+                debug_log(
+                    "INFO",
+                    "⏭️",
+                    f"Skipping Re-ranking: Number of retrieved chunks ({len(docs)}) is <= final context limit ({k_val}).",
+                )
 
         # Fallback & Min Guarantee logic
         if len(docs) < min_results:
             if print_debug:
                 debug_log(
                     "WARNING",
-                    "⚠️",
-                    f"Hybrid/Keyword Search returned {len(docs)} chunks. Triggering Fallback to Pure Semantic Search with relaxed threshold to guarantee at least {min_results} results.",
+                    message=f"Hybrid/Keyword Search returned {len(docs)} chunks. Triggering Fallback to Pure Semantic Search with relaxed threshold to guarantee at least {min_results} results.",
                 )
 
             # Lower score threshold or run pure similarity

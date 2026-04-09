@@ -74,7 +74,8 @@ def init_db(db_name: str = cfg.DB_ROOT_PATH, print_debug: bool = False) -> None:
         CREATE TABLE IF NOT EXISTS notebook_settings (
             id TEXT PRIMARY KEY NOT NULL,
             notebook_id TEXT NOT NULL UNIQUE,
-            rag_retrieval_k INTEGER DEFAULT {cfg.RAG_RETRIEVAL_K},
+            rag_final_context_k INTEGER DEFAULT {cfg.RAG_FINAL_CONTEXT_K},
+            rag_rerank_top_n INTEGER DEFAULT {cfg.RAG_RERANK_TOP_N},
             rag_retrieval_min_results INTEGER DEFAULT {cfg.RAG_RETRIEVAL_MIN_RESULTS},
             rag_retrieval_score_threshold REAL DEFAULT {cfg.RAG_RETRIEVAL_SCORE_THRESHOLD},
             rag_max_chunk_len INTEGER DEFAULT {cfg.RAG_MAX_CHUNK_LEN},

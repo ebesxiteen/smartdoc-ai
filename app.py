@@ -546,7 +546,9 @@ def process_file(
 
             # Embed with GPU/CPU fallback
             if print_debug:
-                debug_log("EMBED", message=f"Creating embeddings for {num_chunks} chunks")
+                debug_log(
+                    "EMBED", message=f"Creating embeddings for {num_chunks} chunks"
+                )
             if progress_callback:
                 progress_callback("Loading embedding model...")
             embeddings = try_load_embeddings()
@@ -596,7 +598,8 @@ def process_file(
             # Generate suggested questions
             if print_debug:
                 debug_log(
-                    "PROCESS_START", message=f"Generating suggested questions for {filename}"
+                    "PROCESS_START",
+                    message=f"Generating suggested questions for {filename}",
                 )
             suggested_questions = generate_suggested_questions(
                 chunks, notebook_id=notebook_id
@@ -649,7 +652,7 @@ def process_file(
         return True
 
     except Exception as e:
-        debug_log("ERROR", message=f'Document processing failed: {filename} - {str(e)}')
+        debug_log("ERROR", message=f"Document processing failed: {filename} - {str(e)}")
         st.error(f"Error processing file: {str(e)}")
         return False
 
@@ -1246,7 +1249,9 @@ def chat_interface(notebook_name: str, print_debug: bool = False) -> None:
                 key="toggle_right_sidebar",
                 use_container_width=True,
             ):
-                st.session_state.show_notes_panel = not st.session_state.show_notes_panel
+                st.session_state.show_notes_panel = (
+                    not st.session_state.show_notes_panel
+                )
                 st.rerun()
 
             if st.button(
@@ -1492,8 +1497,7 @@ def chat_interface(notebook_name: str, print_debug: bool = False) -> None:
                         error_msg = str(e)
                         debug_log(
                             "ERROR",
-                            "❌",
-                            f"Error during answer generation: {error_msg}",
+                            message=f"Error during answer generation: {error_msg}",
                         )
 
                         # Check for CUDA/memory-related errors
@@ -1814,15 +1818,26 @@ def render_notebook_settings_sidebar(notebook_id: str) -> None:
             help=cfg.WEIGHT_SEMANTIC_HELP_MSG,
         )
 
+        new_rerank_n = st.number_input(
+            "Initial Retrieval Pool (Top-N)",
+            key=f"rerank{k_suf}",
+            min_value=cfg.RAG_RERANK_TOP_N_MIN,
+            max_value=cfg.RAG_RERANK_TOP_N_MAX,
+            step=cfg.RAG_RERANK_TOP_N_STEP,
+            value=int(settings.get("rag_rerank_top_n", cfg.RAG_RERANK_TOP_N)),
+            placeholder=str(cfg.RAG_RERANK_TOP_N),
+            help=cfg.RAG_RERANK_TOP_N_HELP_MSG,
+        )
+
         new_k = st.number_input(
-            "Retrieval K",
+            "Final LLM Context (Top-K)",
             key=f"k{k_suf}",
-            min_value=cfg.RAG_RETRIEVAL_K_MIN,
-            max_value=cfg.RAG_RETRIEVAL_K_MAX,
-            step=cfg.RAG_RETRIEVAL_K_STEP,
-            value=int(settings["rag_retrieval_k"]),
-            placeholder=str(cfg.RAG_RETRIEVAL_K),
-            help=cfg.RAG_RETRIEVAL_K_HELP_MSG,
+            min_value=cfg.RAG_FINAL_CONTEXT_K_MIN,
+            max_value=cfg.RAG_FINAL_CONTEXT_K_MAX,
+            step=cfg.RAG_FINAL_CONTEXT_K_STEP,
+            value=int(settings["rag_final_context_k"]),
+            placeholder=str(cfg.RAG_FINAL_CONTEXT_K),
+            help=cfg.RAG_FINAL_CONTEXT_K_HELP_MSG,
         )
 
         new_threshold = st.slider(
@@ -1889,6 +1904,7 @@ def render_notebook_settings_sidebar(notebook_id: str) -> None:
         )
 
         is_safe = True
+        is_forbidden = False  # For configurations that are logically invalid and cannot be applied at all
 
         # A. Hardware & Memory Capacity Warnings:
         is_heavy_model = (
@@ -1930,6 +1946,19 @@ def render_notebook_settings_sidebar(notebook_id: str) -> None:
         if new_min_res > new_k:
             st.error(
                 f"⚠️ Logic Error: Minimum results ({int(new_min_res)}) cannot be greater than the maximum chunks fetched (Retrieval K: {int(new_k)})."
+            )
+            is_safe = False
+
+        if new_k > new_rerank_n:
+            st.error(
+                f"❌ Final LLM Context ({new_k}) cannot exceed Initial Retrieval Pool ({new_rerank_n}). Please adjust."
+            )
+            is_forbidden = True
+
+        vram = hw_info.get("vram_gb") or 0.0
+        if new_rerank_n > 40 and vram < 0.1:
+            st.warning(
+                "⚠️ High Initial Retrieval Pool without a dedicated GPU. Cross-Encoder Re-ranking will heavily impact 'Time to First Token'. Decrease Top-N for faster responses."
             )
             is_safe = False
 
@@ -1984,11 +2013,16 @@ def render_notebook_settings_sidebar(notebook_id: str) -> None:
         st.rerun()
 
     if apply_clicked:
+        if is_forbidden:
+            st.session_state.settings_toast = "❌ Cannot apply settings due to configuration conflicts. Please adjust the parameters and try again."
+            return
+
         updated_settings: Dict[str, Any] = {
             "llm_model_name": str(new_model),
             "llm_temp": float(new_temp),
             "llm_num_ctx": int(new_num_ctx),
-            "rag_retrieval_k": int(new_k),
+            "rag_final_context_k": int(new_k),
+            "rag_rerank_top_n": int(new_rerank_n),
             "rag_retrieval_score_threshold": float(new_threshold),
             "max_msg_history": int(new_history),
             "rag_max_chunk_len": int(new_chunk_len),
@@ -2199,7 +2233,9 @@ def confirm_delete_source_dialog(
         ):
             with st.spinner(f"Removing {file_name}..."):
                 if print_debug:
-                    debug_log("PROCESS_START", message=f"Deleting document: {file_name}")
+                    debug_log(
+                        "PROCESS_START", message=f"Deleting document: {file_name}"
+                    )
 
                 if db_middleware.delete_source(source_id):
                     source_dir = get_source_vectorstore_dir(notebook_id, source_id)

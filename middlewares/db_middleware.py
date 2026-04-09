@@ -234,7 +234,8 @@ def upsert_notebook_settings(notebook_id: str, settings: Dict[str, Any]) -> None
     # 1. Define the validation schema
     # Format: "key": (min_val, max_val)
     validation_map: Dict[str, tuple[int | float, int | float]] = {
-        "rag_retrieval_k": (cfg.RAG_RETRIEVAL_K_MIN, cfg.RAG_RETRIEVAL_K_MAX),
+        "rag_final_context_k": (cfg.RAG_FINAL_CONTEXT_K_MIN, cfg.RAG_FINAL_CONTEXT_K_MAX),
+        "rag_rerank_top_n": (cfg.RAG_RERANK_TOP_N_MIN, cfg.RAG_RERANK_TOP_N_MAX),
         "rag_retrieval_min_results": (
             cfg.RAG_RETRIEVAL_MIN_RESULTS_MIN,
             cfg.RAG_RETRIEVAL_MIN_RESULTS_MAX,

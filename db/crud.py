@@ -355,15 +355,16 @@ def upsert_notebook_settings(notebook_id: str, settings: Dict[str, Any]) -> None
         cursor.execute(
             """
             INSERT INTO notebook_settings (
-                id, notebook_id, rag_retrieval_k, rag_retrieval_min_results,
+                id, notebook_id, rag_final_context_k, rag_rerank_top_n, rag_retrieval_min_results,
                 rag_retrieval_score_threshold, rag_max_chunk_len,
                 rag_chunk_overlap, rag_max_ctx_len, max_msg_history,
                 llm_model_name, llm_num_ctx, llm_temp, personal_ctx,
                 weight_semantic, weight_bm25, updated_at
             ) VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP
             ) ON CONFLICT(notebook_id) DO UPDATE SET
-                rag_retrieval_k=excluded.rag_retrieval_k,
+                rag_final_context_k=excluded.rag_final_context_k,
+                rag_rerank_top_n=excluded.rag_rerank_top_n,
                 rag_retrieval_min_results=excluded.rag_retrieval_min_results,
                 rag_retrieval_score_threshold=excluded.rag_retrieval_score_threshold,
                 rag_max_chunk_len=excluded.rag_max_chunk_len,
@@ -381,7 +382,8 @@ def upsert_notebook_settings(notebook_id: str, settings: Dict[str, Any]) -> None
             (
                 setting_id,
                 notebook_id,
-                settings.get("rag_retrieval_k"),
+                settings.get("rag_final_context_k"),
+                settings.get("rag_rerank_top_n"),
                 settings.get("rag_retrieval_min_results"),
                 settings.get("rag_retrieval_score_threshold"),
                 settings.get("rag_max_chunk_len"),

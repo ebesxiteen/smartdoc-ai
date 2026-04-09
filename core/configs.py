@@ -22,6 +22,8 @@ EMBEDDING_MODEL_NAME: str = (
     "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
 )
 
+CROSS_ENCODER_MODEL_NAME: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+
 # Maximum number of past messages (user + assistant) to keep in conversation history for context (higher = more context but may cause CUDA OOM)
 MAX_MSG_HISTORY: int = 10
 
@@ -250,7 +252,10 @@ QUESTIONS:"""
 # RAG RETRIEVAL CONFIGURATIONS - Optimize these for your use case
 # ============================================================================
 # Maximum number of chunks to retrieve (higher = more context but may cause CUDA OOM)
-RAG_RETRIEVAL_K: int = 8
+RAG_FINAL_CONTEXT_K: int = 8
+
+# Number of chunks retrieved by initial broad search to send to cross-encoder
+RAG_RERANK_TOP_N: int = 30
 
 # Minimum results to guarantee even if quality threshold filters out too much
 RAG_RETRIEVAL_MIN_RESULTS: int = 1
@@ -268,7 +273,7 @@ RAG_MAX_CHUNK_LEN: int = 1000
 RAG_CHUNK_OVERLAP: int = round(0.2 * RAG_MAX_CHUNK_LEN)
 
 # Max total context length in characters to send to LLM (prevents CUDA OOM)
-RAG_MAX_CTX_LEN: int = RAG_RETRIEVAL_K * RAG_MAX_CHUNK_LEN
+RAG_MAX_CTX_LEN: int = RAG_FINAL_CONTEXT_K * RAG_MAX_CHUNK_LEN
 
 # ============================================================================
 # LLM CONFIGURATIONS
@@ -348,10 +353,19 @@ PRINT_DEBUG: bool = True
 # ============================================================================
 
 # Retrieval k
-RAG_RETRIEVAL_K_MIN: int = 1
-RAG_RETRIEVAL_K_MAX: int = 20
-RAG_RETRIEVAL_K_STEP: int = 1
-RAG_RETRIEVAL_K_HELP_MSG: str = "Number of document chunks to retrieve for context. Higher values provide more information but may cause slower responses or GPU memory issues."
+RAG_FINAL_CONTEXT_K_MIN: int = 1
+RAG_FINAL_CONTEXT_K_MAX: int = 20
+RAG_FINAL_CONTEXT_K_STEP: int = 1
+RAG_FINAL_CONTEXT_K_HELP_MSG: str = "Number of document chunks to retrieve for context. Higher values provide more information but may cause slower responses or GPU memory issues."
+
+
+# Rerank Top N
+RAG_RERANK_TOP_N_MIN: int = 5
+RAG_RERANK_TOP_N_MAX: int = 100
+RAG_RERANK_TOP_N_STEP: int = 5
+RAG_RERANK_TOP_N_HELP_MSG: str = (
+    "Number of chunks fetched by initial search to send to cross-encoder."
+)
 
 # Retrieval minimum results
 RAG_RETRIEVAL_MIN_RESULTS_MIN = 0
@@ -517,7 +531,7 @@ LOG_CATEGORIES = {
         "description": "Fallback retrieval strategy activated",
     },
     # Warnings & Cautions
-    "WARN": {
+    "WARNING": {
         "emoji": "⚠️",
         "type": "WARNING",
         "description": "Warning - potential issue",
