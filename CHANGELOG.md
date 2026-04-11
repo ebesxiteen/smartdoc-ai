@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- **Re-ranking with Cross-Encoder**: Implemented the re-ranking of retrieved chunks using a Cross-Encoder model to improve the relevance of retrieved documents for answer generation. This involves many modifications from database schema (adding `rag_final_context_k` and `rag_rerank_top_n`) to the RAG pipeline logic in `app.py` and `core/utils.py`, as well as changes to the UI for configuring these parameters.
+
+### Fixed
+
+- **Debug Log Function Usage**: Corrected the `LOG_CATEGORIES` in `/core/utils.py` and optimized the usage of the `debug_log` function in `app.py` and `core/utils.py` to ensure there's no need to provide emojis as a parameter if the `log_type` is recognized. This streamlines the logging process and reduces redundancy in log statements.
+
 ## [v1.1.0] - 2026-04-08
 
 ### Added
@@ -235,5 +245,6 @@ None
 
 ---
 
+[Unreleased]: https://github.com/dungtq2k5/smartdoc-ai/compare/v1.1.0...HEAD
 [1.1.0]: https://github.com/dungtq2k5/smartdoc-ai/compare/v1.0.0...1.1.0
 [1.0.0]: https://github.com/dungtq2k5/smartdoc-ai/releases/tag/v1.0.0
