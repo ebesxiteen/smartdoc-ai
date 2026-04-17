@@ -6,8 +6,9 @@
 
 ## 🌟 Features
 
-- **⚙️ Notebook Settings**: Customize memory, retrieval count, score thresholds, and prompts independently per notebook natively via UI.
+- **⚙️ Notebook Settings**: Customize memory, retrieval count, score thresholds, Self-RAG quality gates, and prompts independently per notebook natively via UI.
 - **📚 Document Hub**: Manage PDF and Word documents, track real-time hardware status (RAM/VRAM), and configure intelligent settings with hardware-aware warnings.
+- **🧠 Self-RAG Pipeline**: Multi-hop retrieval with automatic quality scoring (groundedness, relevance, utility) and a repair agent that retries failed searches with a new strategy — delivering significantly more accurate and grounded answers than a single-pass RAG.
 - **🔍 Hybrid Search**: Intelligently retrieve relevant document sections using combined semantic search (FAISS embeddings) and BM25 full-text search with configurable weighting.
 - **🤖 Grounded AI Responses**: Get answers strictly based on your documents with automatic source citations
 - **🌐 Multi-language Support**: Ask questions in Vietnamese, English, or other languages and receive answers in your preferred language
@@ -130,7 +131,15 @@ WEIGHT_BM25: float = 0.5                     # BM25 weight (keyword match)
 # LLM Setup
 OLLAMA_BASE_URL = "http://localhost:11434"  # Ollama server
 LLM_MODEL_NAME = "qwen2.5:7b"
-LLM_TEMPERATURE = 0.7            # 0 = deterministic, 1 = creative
+LLM_AVG_TEMP = 0.7               # Base temperature; Self-RAG spreads candidates across [0.1, LLM_AVG_TEMP * 1.5]
+
+# Self-RAG Quality Gates
+SELF_RAG_MAX_DEPTH: int = 2          # Max recursive repair hops before fallback
+SELF_RAG_CANDIDATES: int = 3         # Diverse answer drafts generated per hop
+SELF_RAG_MAX_RETRIES_PER_HOP: int = 2 # Sub-query rewrite retries before skipping
+SELF_RAG_THRESHOLD_ISSUP: float = 0.70 # Groundedness gate (answer supported by docs?)
+SELF_RAG_THRESHOLD_ISREL: float = 0.70 # Relevance gate (chunks match the query?)
+SELF_RAG_THRESHOLD_ISUSE: float = 0.70 # Utility gate (answer satisfies user intent?)
 
 # ...
 ```
@@ -142,6 +151,7 @@ smartdoc-ai/
 ├── app.py                    # Main Streamlit entry point
 ├── core/
 │   ├── configs.py           # Centralized configuration parameters
+│   ├── self_rag.py          # Self-RAG orchestration pipeline (6-step multi-hop)
 │   └── utils.py             # RAG pipeline & utility functions
 ├── db/
 │   ├── setup.py             # Database schema initialization
@@ -202,14 +212,17 @@ smartdoc-ai/
 3. Embed chunks using sentence-transformers
 4. Store embeddings in FAISS; metadata in SQLite
 
-#### Pipeline 2: Query (User Question)
+#### Pipeline 2: Query (User Question — Self-RAG)
 
-1. Embed user's question
-2. Search FAISS for top-K similar chunks
-3. Filter by relevance score
-4. Augment prompt with retrieved context
-5. Send to Qwen2.5 (via Ollama)
-6. Stream response with source citations
+1. **Intent routing**: Classify query as greeting (skip retrieval) or factual (proceed). Layer 1 uses regex; Layer 2 uses an LLM call for ambiguous inputs.
+2. **Query reformulation**: Rewrite follow-up questions into standalone queries using conversation history context.
+3. **Search planning**: LLM decomposes the query into 1–3 independent sub-queries covering different aspects.
+4. **Hybrid retrieval + retry**: Run FAISS semantic + BM25 keyword search per sub-query; cross-encoder re-ranks results. Failed sub-queries are rewritten and retried up to `SELF_RAG_MAX_RETRIES_PER_HOP` times.
+5. **Candidate generation**: Generate `SELF_RAG_CANDIDATES` diverse answer drafts at varied temperatures.
+6. **Quality scoring**: An LLM judge scores each draft on groundedness (ISSUP), relevance (ISREL), and utility (ISUSE).
+7. **Threshold gate**: Accept the best-scoring candidate if all three scores meet configured thresholds.
+8. **Repair & retry**: If no candidate passes, a repair agent diagnoses the failure, generates a new search strategy, and retries the full pipeline — up to `SELF_RAG_MAX_DEPTH` recursive hops.
+9. Stream best answer with source citations; persist confidence score and reasoning trace.
 
 ### Why Local-First?
 

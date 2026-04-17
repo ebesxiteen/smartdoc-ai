@@ -9,9 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- **Self-RAG Replaces Linear RAG Pipeline**: The existing single-pass linear RAG process (`generate_answer()` in `core/utils.py`) has been entirely replaced by a multi-hop Self-RAG orchestration pipeline (`core/self_rag.py`). The query path, prompt structure, and response metadata format have all changed. See the **Self-RAG Pipeline** entry under _Added_ for the full architecture.
+- **Database Schema Migration Required**: Existing databases must be deleted and re-initialized via `python db/setup.py`:
+  - `chat_messages` table: Added `confidence_score` (REAL, 0.0–1.0) and `reasoning_trace` (TEXT, JSON array) columns to persist Self-RAG quality scores and decision trace.
+  - `notebook_settings` table: `llm_temp` column renamed to `llm_avg_temp`; six new Self-RAG control columns added: `self_rag_max_depth`, `self_rag_candidates`, `self_rag_max_retries_per_hop`, `self_rag_threshold_issup`, `self_rag_threshold_isrel`, `self_rag_threshold_isuse`.
+- **`LLM_TEMPERATURE` Config Renamed to `LLM_AVG_TEMP`**: The `LLM_TEMPERATURE` constant in `core/configs.py` has been renamed to `LLM_AVG_TEMP` to reflect that Self-RAG derives a spread of sampling temperatures from this base value when generating diverse candidate answers.
+
 ### Added
 
+- **Self-RAG Pipeline** (`core/self_rag.py`): New module implementing a complete 6-step Self-RAG orchestration pipeline that replaces the old linear generate-once approach:
+  - **Step 0 — Intent Routing**: Two-layer greeting/factual classification. Layer 1 uses regex patterns; Layer 2 falls back to an LLM call (`LAYER2_LLM_ROUTER_PROMPT`) for ambiguous inputs, short-circuiting retrieval entirely for greetings and chitchat.
+  - **Step 1 — Search Planning**: The LLM decomposes the user query into 1–3 independent sub-queries (`SEARCH_PLANNER_PROMPT`) to cover multiple aspects of complex questions. Follow-up questions are first rewritten into self-contained standalone queries (`REFORMULATE_QUERY_PROMPT`) to preserve context without polluting vector search.
+  - **Step 2 — Hybrid Retrieval with Surgical Retry**: Runs hybrid semantic (FAISS) + keyword (BM25) search with cross-encoder re-ranking per sub-query. Sub-queries that return zero results are rewritten up to `SELF_RAG_MAX_RETRIES_PER_HOP` times via `SUBQUERY_REWRITE_PROMPT` before being skipped, preventing total retrieval failure from one bad sub-query.
+  - **Step 3 — Candidate Generation**: Generates `SELF_RAG_CANDIDATES` diverse answer drafts at varied temperatures spread across `[0.1, LLM_AVG_TEMP × 1.5]` to increase the chance one candidate passes all quality gates.
+  - **Step 4 — Quality Scoring**: An LLM judge scores each candidate on three axes via `QUALITY_JUDGE_PROMPT`: **ISSUP** (groundedness — is every claim supported by retrieved context?), **ISREL** (relevance — derived from cross-encoder scores stored in document metadata), and **ISUSE** (utility — does the answer fully satisfy the user's intent?).
+  - **Step 5a — Threshold Validation**: Accepts the highest-scoring candidate if all three scores meet their configurable thresholds (`SELF_RAG_THRESHOLD_ISSUP`, `SELF_RAG_THRESHOLD_ISREL`, `SELF_RAG_THRESHOLD_ISUSE`).
+  - **Step 5b — Repair Agent**: If no candidate passes, a repair agent (`REPAIR_AGENT_PROMPT`) diagnoses the failure reason (low groundedness, low relevance, or low utility) and generates a new retrieval strategy. The full pipeline retries up to `SELF_RAG_MAX_DEPTH` recursive hops. If max depth is reached, the best available candidate is returned as a graceful fallback.
+- **Self-RAG State Tracking** (`SelfRAGState` dataclass): A mutable state object persists across all recursive hops, tracking current depth, search history (to prevent oscillating sub-queries), the cumulative retrieval pool, a verbose `reasoning_trace` for UI transparency, and `confidence_metrics` from the last quality gate.
+- **Self-RAG Configuration Parameters** (`core/configs.py`): Six new tunable constants, each with min/max/step/help metadata for UI rendering:
+  - `SELF_RAG_MAX_DEPTH` (default: 2) — maximum recursive repair hops before fallback.
+  - `SELF_RAG_CANDIDATES` (default: 3) — number of diverse answer drafts generated per hop.
+  - `SELF_RAG_MAX_RETRIES_PER_HOP` (default: 2) — sub-query rewrite attempts before skipping.
+  - `SELF_RAG_THRESHOLD_ISSUP` (default: 0.70) — minimum groundedness score to accept an answer.
+  - `SELF_RAG_THRESHOLD_ISREL` (default: 0.70) — minimum relevance score gate.
+  - `SELF_RAG_THRESHOLD_ISUSE` (default: 0.70) — minimum utility score gate.
+- **Self-RAG Notebook Settings**: All six Self-RAG parameters are configurable per-notebook via the existing Notebook Settings UI panel and persisted to the `notebook_settings` table with full input validation in `middlewares/db_middleware.py`.
+- **Self-RAG Confidence & Trace Persistence**: `confidence_score` (composite quality score) and `reasoning_trace` (step-by-step decision log) from each Self-RAG run are stored in `chat_messages` and reconstructed on chat history load for UI display.
 - **Re-ranking with Cross-Encoder**: Implemented the re-ranking of retrieved chunks using a Cross-Encoder model to improve the relevance of retrieved documents for answer generation. This involves many modifications from database schema (adding `rag_final_context_k` and `rag_rerank_top_n`) to the RAG pipeline logic in `app.py` and `core/utils.py`, as well as changes to the UI for configuring these parameters.
+
+### Changed
+
+- **`LLM_AVG_TEMP` Replaces `LLM_TEMPERATURE`**: The base LLM temperature constant has been renamed to `LLM_AVG_TEMP` to clarify its role as an average from which Self-RAG derives a spread of temperatures for candidate generation, rather than a single fixed inference temperature.
 
 ### Fixed
 
