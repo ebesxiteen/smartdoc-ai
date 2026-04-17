@@ -64,6 +64,8 @@ def init_db(db_name: str = cfg.DB_ROOT_PATH, print_debug: bool = False) -> None:
             content TEXT NOT NULL,
             sources TEXT, -- Stored as JSON string
             found_answer INTEGER DEFAULT 1, -- 1=True (found), 0=False (not found)
+            confidence_score REAL DEFAULT NULL, -- Self-RAG confidence score (0.0-1.0)
+            reasoning_trace TEXT DEFAULT NULL, -- Self-RAG reasoning trace (JSON array)
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (notebook_id) REFERENCES notebooks (id) ON DELETE CASCADE
         )
@@ -84,10 +86,16 @@ def init_db(db_name: str = cfg.DB_ROOT_PATH, print_debug: bool = False) -> None:
             max_msg_history INTEGER DEFAULT {cfg.MAX_MSG_HISTORY},
             llm_model_name VARCHAR(255) DEFAULT '{cfg.LLM_MODEL_NAME}',
             llm_num_ctx INTEGER DEFAULT {cfg.LLM_NUM_CTX},
-            llm_temp REAL DEFAULT {cfg.LLM_TEMPERATURE},
+            llm_avg_temp REAL DEFAULT {cfg.LLM_AVG_TEMP},
             personal_ctx TEXT,
             weight_semantic REAL DEFAULT {cfg.WEIGHT_SEMANTIC},
             weight_bm25 REAL DEFAULT {cfg.WEIGHT_BM25},
+            self_rag_max_depth INTEGER DEFAULT {cfg.SELF_RAG_MAX_DEPTH},
+            self_rag_candidates INTEGER DEFAULT {cfg.SELF_RAG_CANDIDATES},
+            self_rag_max_retries_per_hop INTEGER DEFAULT {cfg.SELF_RAG_MAX_RETRIES_PER_HOP},
+            self_rag_threshold_issup REAL DEFAULT {cfg.SELF_RAG_THRESHOLD_ISSUP},
+            self_rag_threshold_isrel REAL DEFAULT {cfg.SELF_RAG_THRESHOLD_ISREL},
+            self_rag_threshold_isuse REAL DEFAULT {cfg.SELF_RAG_THRESHOLD_ISUSE},
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (notebook_id) REFERENCES notebooks (id) ON DELETE CASCADE

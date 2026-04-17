@@ -86,6 +86,7 @@ DEFAULT_EN_GREETING_PATTERNS: list[str] = [
     r"^how's it going",
     r"^how is everything",
     r"^nice to meet you",
+    r"^(what'?s up|wassup|wass up)",  # Informal greetings
     # ==== CLOSINGS & GRATITUDE ====
     r"^(bye|goodbye|see you|take care|farewell|see ya)",
     r"^(thank you|thank|thanks|thanx|thx)",
@@ -102,7 +103,7 @@ DEFAULT_EN_GREETING_PATTERNS: list[str] = [
     r"^how does (this work|it work)",
     # ==== GENERAL KNOWLEDGE REQUESTS (Non-Document) ====
     r"^tell me about (?!.*this document)",  # "tell me about X" (NOT in documents)
-    r"^explain (what |how |why )?(?!.*from)",  # "explain X" (standalone)
+    r"^explain (what |how |why )",  # "explain what/how/why X" (must have keyword)
     r"^what('s| is) (the )?definition of",
     r"^what is the meaning of",
     r"^(define|definition of)",
@@ -249,6 +250,160 @@ RULES:
 QUESTIONS:"""
 
 # ============================================================================
+# SELF-RAG PROMPTS - Advanced multi-hop retrieval with quality scoring
+# ============================================================================
+
+# Layer 2 LLM-based greeting validation (fallback if regex misses greetings)
+LAYER2_LLM_ROUTER_PROMPT: str = """You are an intent classifier for a document retrieval system.
+
+Given a user query, determine if it's a greeting/chitchat or a factual question requiring document search.
+
+QUERY: {query}
+
+Respond with ONLY one word: "GREETING" or "FACTUAL"
+
+GREETING examples (return GREETING):
+- "Hello!", "Hi there!", "Hey!", "Hiya!", "Greetings"
+- "How are you?", "How are you doing?", "What's up?"
+- "What's your name?", "Who are you?", "Are you an AI?"
+- "Good morning!", "Good evening!", "Chào bạn!", "你好!"
+- "Thanks!", "Thank you!", "Goodbye!", "See you!"
+- Mixed: "Hi! What's your name and can you help me?" → GREETING (greeting intent dominates)
+
+FACTUAL examples (return FACTUAL):
+- "What is machine learning?"
+- "How does photosynthesis work?"
+- "Explain the main conclusions of this paper."
+- "What were the results in section 3?"
+- Any question requiring specific factual information from documents
+
+Response:"""
+
+# Search plan generation: Break down complex query into 1-3 independent sub-queries
+SEARCH_PLANNER_PROMPT: str = """You are a search strategy expert for document retrieval.
+
+Analyze the user's original query and break it into 1-3 independent sub-queries that together cover all aspects of the original question.
+
+ORIGINAL QUERY: {original_query}
+
+Rules:
+1. Each sub-query must be independent and retrievable via vector search.
+2. Sub-queries should cover different angles/aspects of the original query if complex.
+3. Avoid redundancy — don't repeat the same query or surface the same aspect twice.
+4. Keep each sub-query under 15 words.
+5. **Language**: Generate sub-queries in the EXACT same language as the original query. Do NOT translate. If the query is in Vietnamese, output Vietnamese sub-queries. If in English, output English sub-queries.
+6. If the original query references previous context (e.g., "What about it?", "Tell me more"), incorporate that context explicitly into the sub-queries so each one is self-contained.
+7. Output ONLY the sub-queries, one per line, no numbering, no bullet points, no explanations.
+
+SUB-QUERIES:"""
+
+# Repair agent: Diagnose failed answers and generate new strategy
+REPAIR_AGENT_PROMPT: str = """You are a diagnostic repair agent for a multi-hop retrieval system.
+
+An AI answer failed quality checks. Analyze the failure and suggest a DIFFERENT search strategy to find better information.
+
+ORIGINAL QUERY: {original_query}
+FAILED ANSWER: {failed_answer}
+FAILURE REASON: {failure_reason}
+PREVIOUS SEARCH ATTEMPTS: {search_history}
+
+Diagnosis and strategy:
+- If ISSUP failed (low groundedness): Search for more specific source passages; try quoting exact terms from the domain.
+- If ISREL failed (low relevance): Broaden the search angle; try synonyms or related concepts.
+- If ISUSE failed (low utility): Reframe the sub-query to better match the user's intent.
+- Always avoid repeating keywords or angles from PREVIOUS SEARCH ATTEMPTS.
+
+Generate 1-3 NEW search sub-queries using a different angle or related concepts.
+
+**Language**: Generate sub-queries in the EXACT same language as the original query.
+**Format**: Output ONLY the new sub-queries, one per line, no numbering, no bullet points, no explanations.
+
+NEW SEARCH STRATEGY:"""
+
+# Sub-query rewrite prompt: LLM-based rewrite for failed sub-queries during horizontal retry
+SUBQUERY_REWRITE_PROMPT: str = """You are a search query optimization specialist.
+A sub-query returned zero results from the vector database. Rewrite it to improve retrieval.
+
+ORIGINAL QUERY: {original_query}
+FAILED SUB-QUERY: {failed_subquery}
+SUCCESSFUL CONTEXT (from other sub-queries, if any): {success_context}
+
+Rules:
+1. Use synonyms or alternative phrasing for the failed sub-query
+2. Try a broader or narrower scope based on the context
+3. Avoid repeating the exact same keywords that already failed
+4. Output ONLY the new sub-query, one line, no explanations
+
+NEW SUB-QUERY:"""
+
+# Quality judge: Score answer on Groundedness (ISSUP) and Utility (ISUSE)
+# Note: ISREL (relevance) is derived separately from cross-encoder scores stored in document metadata.
+QUALITY_JUDGE_PROMPT: str = """You are a rigorous quality evaluator for AI-generated responses.
+
+Score this answer on TWO dimensions using a strict JSON response format.
+
+QUERY: {query}
+ANSWER: {answer}
+RETRIEVED CONTEXT: {context}
+
+Respond with ONLY valid JSON (no markdown code blocks, no extra text, no trailing commas):
+{{
+    "issup": <float 0.0-1.0>,
+    "isuse": <float 0.0-1.0>,
+    "reasoning": "<one sentence explaining the score>"
+}}
+
+Scoring criteria:
+- **ISSUP** (Groundedness, 0.0–1.0): How well is the answer supported by the RETRIEVED CONTEXT?
+  - 1.0: Every claim in the answer is directly evidenced by the retrieved context.
+  - 0.7: Most claims are supported; minor details may go slightly beyond the context.
+  - 0.5: About half of the claims are supported; the rest are inferred or speculative.
+  - 0.0: The answer contradicts or ignores the retrieved context entirely (hallucination).
+
+- **ISUSE** (Utility / User Satisfaction, 0.0–1.0): Does the answer directly satisfy the user's intent?
+  - 1.0: The answer fully resolves the query with the right scope, depth, and format.
+  - 0.7: Mostly helpful but missing one minor aspect or slightly off in framing.
+  - 0.5: Partially answers the query but is incomplete or tangential.
+  - 0.0: The answer does not address the query at all.
+
+IMPORTANT: If the retrieved context is empty or clearly unrelated, set ISSUP ≤ 0.3 to reflect lack of grounding.
+"""
+
+REFORMULATE_QUERY_PROMPT: str = """You are a query reformulation specialist for a multi-lingual document retrieval system.
+
+TASK: Given the conversation history and a follow-up question, rephrase the follow-up question into a STANDALONE question optimized for vector database search. A standalone question can be understood without reading the chat history.
+
+RULES:
+1. **Preserve Language**: The reformulated question MUST be in the EXACT same language as the follow-up question. Do NOT translate under any circumstances.
+2. **Replace References**: Substitute pronouns ("it", "they", "this", "đó", "chúng") and vague references with the explicit terms found in the chat history.
+3. **Preserve Intent**: Keep all key terms and domain-specific vocabulary intact. Do not add, remove, or change the meaning of the question.
+4. **Preserve Conversational Intent (CRITICAL)**: If the follow-up question is conversational, a greeting, or asking about the AI's state/knowledge (e.g., "How are you?", "Do you know my name?", "Who are you?"), return it EXACTLY as-is. DO NOT convert conversational queries into third-person factual questions (e.g., do not change "Do you know my name?" to "Do you know John?").
+5. **Return as-is when appropriate**: If the follow-up question is already standalone (makes complete sense without context) or conversational, return it EXACTLY as provided — do not modify it.
+6. **No meta-commentary**: Output ONLY the reformulated question. No explanations, no labels, no introductory phrases.
+
+EXAMPLES:
+- History: "User: What is the difference between RAG and fine-tuning?"
+  Follow-up: "Which one is better for production?"
+  Output: "Which is better for production use: RAG or fine-tuning?"
+
+- History: "User: Hello, my name is Peter-> AI: Hello Peter."
+  Follow-up: "Do you know my name?"
+  Output: "Do you know my name?"
+
+- History: "User: AI có thể dùng Neural Networks hoặc Decision Trees."
+  Follow-up: "Vậy phương pháp thứ hai có ưu điểm gì?"
+  Output: "Decision Trees có ưu điểm gì?"
+
+- Follow-up: "What is machine learning?" (already standalone)
+  Output: "What is machine learning?"
+
+Chat History:
+{chat_history}
+
+Follow-up Question: {query}
+Standalone Question:"""
+
+# ============================================================================
 # RAG RETRIEVAL CONFIGURATIONS - Optimize these for your use case
 # ============================================================================
 # Maximum number of chunks to retrieve (higher = more context but may cause CUDA OOM)
@@ -276,71 +431,150 @@ RAG_CHUNK_OVERLAP: int = round(0.2 * RAG_MAX_CHUNK_LEN)
 RAG_MAX_CTX_LEN: int = RAG_FINAL_CONTEXT_K * RAG_MAX_CHUNK_LEN
 
 # ============================================================================
+# SELF-RAG CONFIGURATIONS - Advanced multi-hop retrieval with quality scoring
+# ============================================================================
+# Maximum recursion depth for repair attempts (higher = more thorough but slower)
+SELF_RAG_MAX_DEPTH: int = 2
+
+# Number of parallel candidate answers to generate per hop (higher = more diversity but slower)
+SELF_RAG_CANDIDATES: int = 3
+
+# Maximum retry attempts for individual failing sub-queries during horizontal retrieval
+SELF_RAG_MAX_RETRIES_PER_HOP: int = 2
+
+# Quality threshold for Groundedness (ISSUP): How supported is the answer by retrieved documents?
+SELF_RAG_THRESHOLD_ISSUP: float = 0.70
+
+# Quality threshold for Relevance (ISREL): How relevant are retrieved chunks to the original query?
+SELF_RAG_THRESHOLD_ISREL: float = 0.70
+
+# Quality threshold for Utility (ISUSE): Does the answer meet the user's intent?
+SELF_RAG_THRESHOLD_ISUSE: float = 0.70
+
+# ============================================================================
 # LLM CONFIGURATIONS
 # ============================================================================
 
 
-def get_sys_prompt(custom_instructions: Optional[str] = None) -> str:
+def generate_general_knowledge_fallback_prompt(
+    user_query: str,
+    chat_history: Optional[str] = None,
+    query_complexity: str = "medium",
+) -> str:
     """
-    Get enhanced system prompt with current time, general knowledge permission,
-    and strict XML boundaries for RAG processing.
+    Generate a prompt for LLM to produce fallback answers when no relevant documents found.
+
+    This function creates context-aware fallback answers instead of hard-coded messages,
+    improving user experience by providing dynamic, thoughtful responses.
+
+    Args:
+        user_query: The original user question
+        chat_history: Optional formatted conversation history for context
+        query_complexity: 'simple', 'medium', or 'complex' to tailor response depth
+
+    Returns:
+        Prompt string for LLM to generate fallback answer
     """
-    # Using a slightly cleaner time format for readability
     current_time = datetime.now(timezone.utc).strftime("%A, %B %d, %Y at %H:%M UTC")
 
-    base_role = (
-        f"You are {APP_NAME}, a highly capable and professional research assistant."
+    # Adjust response style based on query complexity
+    complexity_guidance = {
+        "simple": "Keep your answer concise and direct (2-3 sentences).",
+        "medium": "Provide a balanced answer with key points (3-5 sentences).",
+        "complex": "Give a comprehensive answer with multiple perspectives and details (5-7 sentences).",
+    }
+    depth_guidance = complexity_guidance.get(
+        query_complexity, complexity_guidance["medium"]
     )
-    override_block = (
-        f"\nADDITIONAL USER INSTRUCTIONS:\n{custom_instructions}\n"
-        if custom_instructions
-        else ""
-    )
 
-    enhanced_prompt = f"""{base_role}
-Current Time: {current_time}
-{override_block}
-ROLE & BEHAVIOR:
-You answer user questions based primarily on the provided `<context>`. If the user asks general questions, greetings, or about your capabilities, you may use your internal knowledge.
+    # Build conversation context if available
+    history_block = ""
+    if chat_history:
+        history_block = f"\nPREVIOUS CONVERSATION:\n{chat_history}\n"
 
-STRICT GUIDELINES:
-1. **Document-Based Q&A**:
-   - If the question asks for facts, summaries, or specific data, search the `<context>` thoroughly.
-   - Do NOT hallucinate or invent facts, numbers, or names not present in the context.
-   - Cite source page numbers naturally if they are available in the context.
+    prompt = f"""You are {APP_NAME}, a helpful research assistant.
 
-2. **General Knowledge & Greetings**:
-   - If the user says "Hello," asks for the time, or asks a broad question clearly outside the scope of the documents, answer naturally using your general knowledge.
+Current Time: {current_time}{history_block}
 
-3. **Language & Formatting**:
-   - Respond in the EXACT language of the user's question.
-   - **CRITICAL**: Do NOT translate technical keywords (e.g., "RAG", "LLM", "API", "Database"). Keep them in their original form.
-   - Use Markdown (bullet points, bold text) to structure your answer cleanly.
+IMPORTANT: The user's question could not be answered from available documents.
+Provide a helpful answer using your general knowledge.
 
-TAGGING REQUIREMENT (CRITICAL):
-You MUST end your final response with exactly ONE of the following tags on a new line. Do not write anything after the tag:
-- [STATUS: DOC_ANSWER] — You successfully answered the question using information found in the context.
-- [STATUS: DOC_MISSING] — The user asked about a specific topic, but the context lacked the information. (You must politely explain that the requested information is not available in the documents).
-- [STATUS: GENERAL] — The user asked a greeting or general question, and you answered from your internal knowledge.
+{depth_guidance}
 
-<context>
-{{context}}
-</context>
+Use Markdown formatting for clarity. Be honest if the topic is outside your knowledge.
 
-<user_question>
-{{question}}
-</user_question>
+USER QUESTION: {user_query}
 
 YOUR ANSWER:"""
 
-    return enhanced_prompt
+    return prompt
+
+
+def get_self_rag_system_prompt(
+    personal_ctx: Optional[str] = None,
+    current_time: Optional[str] = None,
+) -> str:
+    """
+    Get system prompt tailored for Self-RAG Step 3 candidate generation.
+
+    This prompt is used during Step 3 (candidate generation) of the Self-RAG pipeline.
+    It is purely document-grounded and does NOT include general knowledge routing or
+    greeting detection—Self-RAG handles those at earlier stages.
+
+    CRITICAL: Status tags [STATUS: DOC_ANSWER/DOC_MISSING/GENERAL] are ADDED later during
+    Step 4 (quality scoring/evaluation), NOT in the generation prompt. This separation ensures:
+    - LLM generates clean answers without tag duplication
+    - Quality judges can score each candidate independently
+    - Prevents [STATUS:X][STATUS:X] tag repetition in final output
+
+    Args:
+        personal_ctx: Personal context about the user (e.g., expertise level, role)
+        current_time: Current datetime for temporal contextual answers
+
+    Returns:
+        System prompt string for use with ChatPromptTemplate.from_messages()
+    """
+    # Use provided time or default to current UTC time
+    if current_time is None:
+        current_time = datetime.now(timezone.utc).strftime("%A, %B %d, %Y at %H:%M UTC")
+
+    # Build personal context section if available
+    personal_context_block = ""
+    if personal_ctx:
+        personal_context_block = f"\n\nYOUR CONTEXT:\n{personal_ctx}\n"
+
+    # System prompt for Self-RAG Step 3: Pure document-grounded generation
+    # No general knowledge routing, no greeting detection—just high-quality answer generation
+    prompt = f"""You are a knowledgeable expert answering a user's question directly and conversationally.
+
+Current Time: {current_time}{personal_context_block}
+
+YOUR TASK:
+Answer the user's question based on the retrieved documents. Write as if you are a subject-matter expert explaining something to a curious person — not writing a formal report.
+
+CRITICAL RULES:
+1. **Ground in Context First**: Base every claim on the retrieved documents. Inline citations like "(Page 46)" are fine where helpful.
+2. **Acknowledge Gaps Honestly**: If the context doesn't fully cover the question, say so briefly and naturally (e.g., "The documents don't go into detail on X, but based on what's available...").
+3. **Use Chat History When Relevant**: If the question references prior conversation, use the CHAT HISTORY to resolve the reference.
+4. **Language Match**: Write in the EXACT same language as the user's question. Do NOT translate.
+5. **Preserve Technical Terms**: Do NOT translate domain keywords (e.g., RAG, LLM, API, FAISS).
+6. **No Status Tags**: Do NOT include [STATUS:...] tags.
+
+STRICT FORMAT RULES (violations will cause this answer to be discarded):
+- Do NOT start with "Answer:", "**Answer:**", or any heading.
+- Do NOT add a "Source Citations:", "References:", or "Additional Note:" section at the end.
+- Do NOT add meta-commentary about the chat history (e.g., "The user mentioned their name is X").
+- Write as flowing prose or a natural bulleted list — not a structured report."""
+
+    return prompt
 
 
 LLM_MODEL_NAME: str = "qwen2.5:7b"
 OLLAMA_BASE_URL: str = "http://localhost:11434"
+LLM_BASE_URL: str = OLLAMA_BASE_URL  # Alias for Self-RAG
 
 # Low temperature for factual, grounded answers, higher may be more creative but less accurate
-LLM_TEMPERATURE: float = 0.7
+LLM_AVG_TEMP: float = 0.7
 
 # Context window size
 LLM_NUM_CTX: int = 4096
@@ -413,10 +647,10 @@ LLM_NUM_CTX_STEP: int = 512
 LLM_NUM_CTX_HELP_MSG: str = "The AI's total short-term memory (1k tokens ≈ 750 words). Higher values allow more sources and longer history but increase GPU RAM usage."
 
 # LLM Temperature
-LLM_TEMPERATURE_MIN: float = 0.0
-LLM_TEMPERATURE_MAX: float = 1.0
-LLM_TEMPERATURE_STEP: float = 0.05
-LLM_TEMPERATURE_HELP_MSG: str = "Controls creativity. Range 0.1 - 0.3 is best for factual research and citations. 0.7-0.9 is better for brainstorming and creative summaries."
+LLM_AVG_TEMP_MIN: float = 0.0
+LLM_AVG_TEMP_MAX: float = 1.0
+LLM_AVG_TEMP_STEP: float = 0.05
+LLM_AVG_TEMP_HELP_MSG: str = "Controls creativity of AI responses. 0.0 = deterministic and focused on factual answers, 1.0 = more creative and diverse but may be less accurate. Adjust based on your use case and preference for creativity vs accuracy."
 
 # System Prompt Override
 PERSONAL_CTX_HELP_MSG: str = "Custom instructions or your personal background to guide the AI's behavior and personality."
@@ -426,6 +660,44 @@ WEIGHT_SEMANTIC_MIN: float = 0.0
 WEIGHT_SEMANTIC_MAX: float = 1.0
 WEIGHT_SEMANTIC_STEP: float = 0.05
 WEIGHT_SEMANTIC_HELP_MSG: str = "Balance between Semantic Vector Search (set value) and Keyword BM25 Search (remaining value). BM25 is better for exact technical terms while Semantic is better for concepts."
+
+# ============================================================================
+# SELF-RAG VALIDATION LIMITS & UI HELPERS
+# ============================================================================
+
+# Self-RAG max depth
+SELF_RAG_MAX_DEPTH_MIN: int = 1
+SELF_RAG_MAX_DEPTH_MAX: int = 5
+SELF_RAG_MAX_DEPTH_STEP: int = 1
+SELF_RAG_MAX_DEPTH_HELP_MSG: str = "Maximum number of recursive repair hops allowed for Self-RAG. Higher values provide more thorough answer refinement but increase latency. Recommended: 2-3."
+
+# Self-RAG max candidates
+SELF_RAG_CANDIDATES_MIN: int = 1
+SELF_RAG_CANDIDATES_MAX: int = 5
+SELF_RAG_CANDIDATES_STEP: int = 1
+SELF_RAG_CANDIDATES_HELP_MSG: str = "Number of diverse candidate answers to generate per hop. Higher values increase answer quality diversity but add latency. Recommended: 2-3."
+
+# Self-RAG max retries per hop
+SELF_RAG_MAX_RETRIES_PER_HOP_MIN: int = 1
+SELF_RAG_MAX_RETRIES_PER_HOP_MAX: int = 3
+SELF_RAG_MAX_RETRIES_PER_HOP_STEP: int = 1
+SELF_RAG_MAX_RETRIES_PER_HOP_HELP_MSG: str = "Maximum attempts to rewrite and retry failing sub-queries during retrieval. Higher values help recover from initial retrieval failure but add latency."
+
+# Self-RAG thresholds for quality gating
+SELF_RAG_THRESHOLD_ISSUP_MIN: float = 0.0
+SELF_RAG_THRESHOLD_ISSUP_MAX: float = 1.0
+SELF_RAG_THRESHOLD_ISSUP_STEP: float = 0.05
+SELF_RAG_THRESHOLD_ISSUP_HELP_MSG: str = "Groundedness threshold: minimum confidence that the answer is supported by retrieved documents. Lower = lenient, Higher = strict."
+
+SELF_RAG_THRESHOLD_ISREL_MIN: float = 0.0
+SELF_RAG_THRESHOLD_ISREL_MAX: float = 1.0
+SELF_RAG_THRESHOLD_ISREL_STEP: float = 0.05
+SELF_RAG_THRESHOLD_ISREL_HELP_MSG: str = "Relevance threshold: minimum confidence that retrieved chunks are relevant to the original query. Lower = lenient, Higher = strict."
+
+SELF_RAG_THRESHOLD_ISUSE_MIN: float = 0.0
+SELF_RAG_THRESHOLD_ISUSE_MAX: float = 1.0
+SELF_RAG_THRESHOLD_ISUSE_STEP: float = 0.05
+SELF_RAG_THRESHOLD_ISUSE_HELP_MSG: str = "Utility threshold: minimum confidence that the answer is useful and addresses the user's intent. Lower = lenient, Higher = strict."
 
 # ============================================================================
 # DEBUG LOGGING CONFIGURATIONS

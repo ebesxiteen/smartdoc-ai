@@ -219,9 +219,12 @@ def add_chat_message(
     content: str,
     sources: Optional[List[Dict[str, Any]]] = None,
     found_answer: Optional[bool] = None,
+    confidence_score: Optional[float] = None,
+    reasoning_trace: Optional[List[str]] = None,
 ) -> str:
     msg_id = str(uuid.uuid4())
     sources_str = json.dumps(sources) if sources else None
+    reasoning_trace_str = json.dumps(reasoning_trace) if reasoning_trace else None
 
     # Convert bool to int for SQLite (True=1, False=0, None=NULL)
     if found_answer is None:
@@ -231,8 +234,17 @@ def add_chat_message(
 
     with get_connection() as conn:
         conn.execute(
-            "INSERT INTO chat_messages (id, notebook_id, role, content, sources, found_answer) VALUES (?, ?, ?, ?, ?, ?)",
-            (msg_id, notebook_id, role, content, sources_str, found_answer_int),
+            "INSERT INTO chat_messages (id, notebook_id, role, content, sources, found_answer, confidence_score, reasoning_trace) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                msg_id,
+                notebook_id,
+                role,
+                content,
+                sources_str,
+                found_answer_int,
+                confidence_score,
+                reasoning_trace_str,
+            ),
         )
     return msg_id
 
@@ -248,6 +260,12 @@ def get_chat_history(notebook_id: str) -> List[Dict[str, Any]]:
         for row in rows:
             msg = dict(row)
             msg["sources"] = json.loads(msg["sources"]) if msg["sources"] else None
+            # Also parse reasoning_trace from JSON
+            if "reasoning_trace" in msg and msg["reasoning_trace"]:
+                msg["reasoning_trace"] = json.loads(msg["reasoning_trace"])
+            else:
+                msg["reasoning_trace"] = None
+
             # Convert found_answer from int back to bool (1=True, 0=False, None=None)
             if "found_answer" in msg:
                 msg["found_answer"] = (
@@ -257,6 +275,11 @@ def get_chat_history(notebook_id: str) -> List[Dict[str, Any]]:
                 msg["found_answer"] = (
                     True  # Default for old messages without this field
                 )
+
+            # Reconstruct confidence_metrics for the UI
+            if msg.get("confidence_score") is not None:
+                msg["confidence_metrics"] = {"total_score": msg["confidence_score"]}
+
             history.append(msg)
         return history
 
@@ -358,10 +381,12 @@ def upsert_notebook_settings(notebook_id: str, settings: Dict[str, Any]) -> None
                 id, notebook_id, rag_final_context_k, rag_rerank_top_n, rag_retrieval_min_results,
                 rag_retrieval_score_threshold, rag_max_chunk_len,
                 rag_chunk_overlap, rag_max_ctx_len, max_msg_history,
-                llm_model_name, llm_num_ctx, llm_temp, personal_ctx,
-                weight_semantic, weight_bm25, updated_at
+                llm_model_name, llm_num_ctx, llm_avg_temp, personal_ctx,
+                weight_semantic, weight_bm25, self_rag_max_depth, self_rag_candidates,
+                self_rag_max_retries_per_hop, self_rag_threshold_issup, self_rag_threshold_isrel,
+                self_rag_threshold_isuse, updated_at
             ) VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP
             ) ON CONFLICT(notebook_id) DO UPDATE SET
                 rag_final_context_k=excluded.rag_final_context_k,
                 rag_rerank_top_n=excluded.rag_rerank_top_n,
@@ -373,10 +398,16 @@ def upsert_notebook_settings(notebook_id: str, settings: Dict[str, Any]) -> None
                 max_msg_history=excluded.max_msg_history,
                 llm_model_name=excluded.llm_model_name,
                 llm_num_ctx=excluded.llm_num_ctx,
-                llm_temp=excluded.llm_temp,
+                llm_avg_temp=excluded.llm_avg_temp,
                 personal_ctx=excluded.personal_ctx,
                 weight_semantic=excluded.weight_semantic,
                 weight_bm25=excluded.weight_bm25,
+                self_rag_max_depth=excluded.self_rag_max_depth,
+                self_rag_candidates=excluded.self_rag_candidates,
+                self_rag_max_retries_per_hop=excluded.self_rag_max_retries_per_hop,
+                self_rag_threshold_issup=excluded.self_rag_threshold_issup,
+                self_rag_threshold_isrel=excluded.self_rag_threshold_isrel,
+                self_rag_threshold_isuse=excluded.self_rag_threshold_isuse,
                 updated_at=CURRENT_TIMESTAMP;
             """,
             (
@@ -392,10 +423,16 @@ def upsert_notebook_settings(notebook_id: str, settings: Dict[str, Any]) -> None
                 settings.get("max_msg_history"),
                 settings.get("llm_model_name"),
                 settings.get("llm_num_ctx"),
-                settings.get("llm_temp"),
+                settings.get("llm_avg_temp"),  # key matches schema column `llm_avg_temp`
                 settings.get("personal_ctx"),
                 settings.get("weight_semantic"),
                 settings.get("weight_bm25"),
+                settings.get("self_rag_max_depth"),
+                settings.get("self_rag_candidates"),
+                settings.get("self_rag_max_retries_per_hop"),
+                settings.get("self_rag_threshold_issup"),
+                settings.get("self_rag_threshold_isrel"),
+                settings.get("self_rag_threshold_isuse"),
             ),
         )
         conn.commit()

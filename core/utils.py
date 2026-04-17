@@ -6,7 +6,7 @@ Includes: PDF processing, chat handling, vectorstore management, and text cleani
 from datetime import datetime, timezone
 import hashlib
 import uuid
-from typing import Any, Dict, List, cast, Optional, Set, Tuple, Callable
+from typing import Any, Dict, List, Optional, Set, Tuple, Callable, cast
 import logging
 
 import streamlit as st
@@ -15,9 +15,7 @@ from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
 
 import core.configs as cfg
-from langchain_core.runnables import RunnableLambda
-from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.messages import BaseMessage
 from pathlib import Path
 import re
 from langdetect import (  # pyright: ignore[reportMissingTypeStubs]
@@ -108,10 +106,16 @@ def get_default_notebook_settings() -> Dict[str, Any]:
             - max_msg_history (int): Maximum chat history messages to retain
             - llm_model_name (str): Ollama model name
             - llm_num_ctx (int): LLM context window size
-            - llm_temp (float): LLM temperature (0.0-2.0)
+            - llm_avg_temp (float): LLM temperature (0.0-2.0)
             - personal_ctx (None): Custom instructions placeholder
             - weight_semantic (float): Weight for semantic (0.0-1.0)
             - weight_bm25 (float): Weight for BM25 keyword search (0.0-1.0)
+            - self_rag_max_depth (int): Maximum recursion depth for Self-RAG repairs
+            - self_rag_candidates (int): Max candidate sub-queries per hop
+            - self_rag_max_retries_per_hop (int): Max retries per hop to prevent oscillation
+            - self_rag_threshold_issup (float): Threshold for "Is Supportive" in Self-RAG
+            - self_rag_threshold_isrel (float): Threshold for "Is Relevant" in Self-RAG
+            - self_rag_threshold_isuse (float): Threshold for "Is Useful" in Self-RAG
 
     Note:
         All values are loaded from core/configs.py. Modify settings there to change defaults.
@@ -127,14 +131,20 @@ def get_default_notebook_settings() -> Dict[str, Any]:
         "max_msg_history": cfg.MAX_MSG_HISTORY,
         "llm_model_name": cfg.LLM_MODEL_NAME,
         "llm_num_ctx": cfg.LLM_NUM_CTX,
-        "llm_temp": cfg.LLM_TEMPERATURE,
+        "llm_avg_temp": cfg.LLM_AVG_TEMP,
         "personal_ctx": None,
         "weight_semantic": cfg.WEIGHT_SEMANTIC,
         "weight_bm25": cfg.WEIGHT_BM25,
+        "self_rag_max_depth": cfg.SELF_RAG_MAX_DEPTH,
+        "self_rag_candidates": cfg.SELF_RAG_CANDIDATES,
+        "self_rag_max_retries_per_hop": cfg.SELF_RAG_MAX_RETRIES_PER_HOP,
+        "self_rag_threshold_issup": cfg.SELF_RAG_THRESHOLD_ISSUP,
+        "self_rag_threshold_isrel": cfg.SELF_RAG_THRESHOLD_ISREL,
+        "self_rag_threshold_isuse": cfg.SELF_RAG_THRESHOLD_ISUSE,
     }
 
 
-def _load_notebook_settings(
+def load_notebook_settings(
     notebook_id: Optional[str],
 ) -> Dict[str, Any]:
     """
@@ -167,22 +177,153 @@ def _load_notebook_settings(
     if not settings:
         return defaults
 
+    # Use `or defaults[key]` so that DB NULL values fall back to config constants.
+    # dict.get(key, default) only uses `default` when the key is absent; it returns
+    # None when the key exists with a NULL value — which would silently break callers
+    # that do arithmetic with the result (e.g., top_k=None crashes rerank_with_cross_encoder).
     return {
-        "rag_final_context_k": settings.get("rag_final_context_k"),
-        "rag_rerank_top_n": settings.get("rag_rerank_top_n"),
-        "rag_retrieval_min_results": settings.get("rag_retrieval_min_results"),
-        "rag_retrieval_score_threshold": settings.get("rag_retrieval_score_threshold"),
-        "rag_max_chunk_len": settings.get("rag_max_chunk_len"),
-        "rag_chunk_overlap": settings.get("rag_chunk_overlap"),
-        "rag_max_ctx_len": settings.get("rag_max_ctx_len"),
-        "max_msg_history": settings.get("max_msg_history"),
-        "llm_model_name": settings.get("llm_model_name"),
-        "llm_num_ctx": settings.get("llm_num_ctx"),
-        "llm_temp": settings.get("llm_temp"),
+        "rag_final_context_k": settings.get("rag_final_context_k")
+        or defaults["rag_final_context_k"],
+        "rag_rerank_top_n": settings.get("rag_rerank_top_n")
+        or defaults["rag_rerank_top_n"],
+        "rag_retrieval_min_results": settings.get("rag_retrieval_min_results")
+        if settings.get("rag_retrieval_min_results") is not None
+        else defaults["rag_retrieval_min_results"],
+        "rag_retrieval_score_threshold": settings.get("rag_retrieval_score_threshold")
+        or defaults["rag_retrieval_score_threshold"],
+        "rag_max_chunk_len": settings.get("rag_max_chunk_len")
+        or defaults["rag_max_chunk_len"],
+        "rag_chunk_overlap": settings.get("rag_chunk_overlap")
+        if settings.get("rag_chunk_overlap") is not None
+        else defaults["rag_chunk_overlap"],
+        "rag_max_ctx_len": settings.get("rag_max_ctx_len")
+        or defaults["rag_max_ctx_len"],
+        "max_msg_history": settings.get("max_msg_history")
+        or defaults["max_msg_history"],
+        "llm_model_name": settings.get("llm_model_name") or defaults["llm_model_name"],
+        "llm_num_ctx": settings.get("llm_num_ctx") or defaults["llm_num_ctx"],
+        # DB column is `llm_avg_temp`; read with that key and fall back to config default.
+        "llm_avg_temp": settings.get("llm_avg_temp") or defaults["llm_avg_temp"],
         "personal_ctx": settings.get("personal_ctx"),
-        "weight_semantic": settings.get("weight_semantic"),
-        "weight_bm25": settings.get("weight_bm25"),
+        "weight_semantic": settings.get("weight_semantic")
+        if settings.get("weight_semantic") is not None
+        else defaults["weight_semantic"],
+        "weight_bm25": settings.get("weight_bm25")
+        if settings.get("weight_bm25") is not None
+        else defaults["weight_bm25"],
+        "self_rag_max_depth": settings.get("self_rag_max_depth")
+        if settings.get("self_rag_max_depth") is not None
+        else defaults["self_rag_max_depth"],
+        "self_rag_candidates": settings.get("self_rag_candidates")
+        or defaults["self_rag_candidates"],
+        "self_rag_max_retries_per_hop": settings.get("self_rag_max_retries_per_hop")
+        if settings.get("self_rag_max_retries_per_hop") is not None
+        else defaults["self_rag_max_retries_per_hop"],
+        "self_rag_threshold_issup": settings.get("self_rag_threshold_issup")
+        if settings.get("self_rag_threshold_issup") is not None
+        else defaults["self_rag_threshold_issup"],
+        "self_rag_threshold_isrel": settings.get("self_rag_threshold_isrel")
+        if settings.get("self_rag_threshold_isrel") is not None
+        else defaults["self_rag_threshold_isrel"],
+        "self_rag_threshold_isuse": settings.get("self_rag_threshold_isuse")
+        if settings.get("self_rag_threshold_isuse") is not None
+        else defaults["self_rag_threshold_isuse"],
     }
+
+
+def generate_fallback_answer(
+    user_query: str,
+    llm_chain: Any,
+    chat_history: Optional[List[Any]] = None,
+    print_debug: bool = False,
+) -> str:
+    """
+    Generate LLM-based fallback answer when no relevant documents found.
+
+    Creates a context-aware fallback response using the LLM instead of hard-coded messages,
+    providing better user experience with dynamic, thoughtful answers.
+
+    Args:
+        user_query: The original user question
+        llm_chain: LLM chain for answer generation
+        chat_history: Optional formatted conversation history for context
+        print_debug: Whether to print debug logs
+
+    Returns:
+        str: LLM-generated fallback answer (context-aware, dynamic)
+    """
+    try:
+        from langchain_core.prompts import ChatPromptTemplate
+
+        # Estimate query complexity based on length and keyword presence
+        query_length = len(user_query.split())
+        complex_keywords = {
+            "how to",
+            "why is",
+            "explain",
+            "compare",
+            "analyze",
+            "what is the",
+        }
+        is_complex = query_length > 10 or any(
+            keyword in user_query.lower() for keyword in complex_keywords
+        )
+        if is_complex:
+            query_complexity = "complex"
+        elif query_length < 5:
+            query_complexity = "simple"
+        else:
+            query_complexity = "medium"
+
+        # Format chat history if available (supports both dict and LangChain message objects)
+        formatted_history = ""
+        if chat_history:
+            history_lines: List[str] = []
+            for msg in chat_history[-3:]:  # Last 3 messages
+                if hasattr(msg, "get"):
+                    role = (
+                        "User"
+                        if msg.get("role", msg.get("type", "")) in ("user", "human")
+                        else "Assistant"
+                    )
+                    content = msg.get("content", "")
+                else:
+                    # LangChain BaseMessage (HumanMessage / AIMessage)
+                    msg_type = getattr(msg, "type", "")
+                    role = "User" if msg_type == "human" else "Assistant"
+                    content = getattr(msg, "content", "")
+                history_lines.append(f"{role}: {content}")
+            formatted_history = "\n".join(history_lines)
+
+        # Generate fallback prompt
+        fallback_prompt = cfg.generate_general_knowledge_fallback_prompt(
+            user_query=user_query,
+            chat_history=formatted_history if formatted_history else None,
+            query_complexity=query_complexity,
+        )
+
+        # Create prompt template and chain
+        prompt = ChatPromptTemplate.from_template(fallback_prompt)
+        chain = prompt | llm_chain
+
+        # Invoke LLM for fallback answer
+        response = chain.invoke({})
+        fallback_answer = str(response).strip()
+
+        if print_debug:
+            debug_log(
+                "INFO",
+                "💭",
+                f"Generated dynamic fallback answer ({len(fallback_answer)} chars, complexity: {query_complexity})",
+            )
+
+        return fallback_answer
+
+    except Exception as e:
+        if print_debug:
+            debug_log("WARNING", "⚠️", f"Fallback generation failed: {str(e)[:100]}")
+        # Fallback to hard-coded message if LLM fails
+        return cfg.NOT_FOUND_ANSWER_FALL_BACK
 
 
 # ============================================================================
@@ -559,7 +700,10 @@ def chunk_and_process_file(
 
 
 def create_vectorstore_from_chunks(
-    chunks: List[Document], embeddings: HuggingFaceEmbeddings, print_debug: bool = False
+    chunks: List[Document],
+    embeddings: HuggingFaceEmbeddings,
+    print_debug: bool = False,
+    progress_callback: Optional[Callable[[str], None]] = None,
 ) -> FAISS:
     """
     Create a FAISS vector database from document chunks.
@@ -568,13 +712,35 @@ def create_vectorstore_from_chunks(
         chunks: List of Document objects with text content to embed and index.
         embeddings: HuggingFaceEmbeddings instance for vectorization.
         print_debug: Enable debug logging.
+        progress_callback: Optional callback for status.
 
     Returns:
         FAISS: Vector store instance ready for similarity search.
     """
     if print_debug:
         debug_log("EMBED", message=f"Creating vectorstore from {len(chunks)} chunks...")
-    return FAISS.from_documents(chunks, embeddings)
+
+    if not progress_callback:
+        return FAISS.from_documents(chunks, embeddings)
+
+    # Batch process for progress updates
+    batch_size = max(10, len(chunks) // 10)  # Update ~10 times ideally
+    vectorstore = None
+
+    for i in range(0, len(chunks), batch_size):
+        batch = chunks[i : i + batch_size]
+        progress_msg = f"Embedding chunks {i + 1} to {min(i + batch_size, len(chunks))} of {len(chunks)}..."
+        progress_callback(progress_msg)
+
+        if vectorstore is None:
+            vectorstore = FAISS.from_documents(batch, embeddings)
+        else:
+            vectorstore.add_documents(batch)
+
+    if vectorstore is None:
+        raise ValueError("Cannot create vectorstore from empty chunks list.")
+
+    return vectorstore
 
 
 def merge_vectorstores(
@@ -675,33 +841,38 @@ def process_user_query(
     chat_history: Optional[List[Dict[str, Any]]] = None,
     print_debug: bool = False,
     notebook_id: Optional[str] = None,
-) -> tuple[str, List[Dict[str, Any]], bool]:
+) -> tuple[str, List[Dict[str, Any]], bool, List[str], Optional[float]]:
     """
-    Process a user query through the RAG pipeline to generate an answer with source citations.
+    Process a user query through the Self-RAG pipeline to generate an answer with source citations.
 
     Handles three query scenarios:
     1. Greetings/General knowledge: Answer without document retrieval
     2. Follow-up questions: Use chat history to rephrase query for better retrieval
-    3. Standalone questions: Direct document retrieval and answering
+    3. Standalone questions: Multi-hop document retrieval with quality-based repair
 
     Args:
         query: The user's question.
-        rag_chain: The instantiated RAG chain from create_history_aware_rag_chain().
+        rag_chain: The instantiated RAG chain from create_history_aware_rag_chain() (uses Self-RAG internally).
         vectorstore: FAISS vectorstore for document retrieval.
         chat_history: Optional list of previous Q&A exchanges for context.
         print_debug: Enable detailed debug logging.
         notebook_id: UUID of the notebook for loading settings.
 
     Returns:
-        Tuple[str, List[Dict[str, Any]], bool]:
+        Tuple[str, List[Dict[str, Any]], bool, List[str]]:
             - answer (str): Clean LLM response (with status tags removed)
             - sources (List[Dict]): Citation sources with keys: document, page, content
             - found_answer (bool): Whether relevant context was found (affects UI display)
+            - reasoning_trace (List[str]): Self-RAG execution trace for transparency (optional UI display)
 
     Note:
+        Self-RAG now handles all answer generation internally through the orchestrated pipeline.
         Answers are tagged with [STATUS: DOC_ANSWER], [STATUS: DOC_MISSING], or [STATUS: GENERAL].
         These tags are stripped before returning to maintain clean output.
+        Reasoning trace is extracted from st.session_state["self_rag_metadata"] for UI transparency.
     """
+    import streamlit as st
+
     if print_debug:
         query_preview = f"{query[:60]}..." if len(query) > 60 else query
         debug_log("QUERY", message=f"Processing: {query_preview}")
@@ -711,7 +882,7 @@ def process_user_query(
     if print_debug and is_greeting_query:
         debug_log("DEBUG", message="Detected greeting → using general knowledge")
 
-    settings = _load_notebook_settings(notebook_id)
+    settings = load_notebook_settings(notebook_id)
 
     # Step 2: Prepare inputs for the RAG chain
     # Build chain input dict with proper structure for history-aware chain
@@ -746,19 +917,36 @@ def process_user_query(
                 debug_log("ITEM", emoji=role_icon, message=content_preview)
             print_breaker()
 
-    # Step 3: Generate answer through RAG chain
+    # Step 3: Generate answer through Self-RAG chain
     if print_debug:
         if is_greeting_query:
-            debug_log("CHAIN", message="Invoking RAG chain [General Knowledge Mode]...")
+            debug_log("CHAIN", message="Invoking Self-RAG [General Knowledge Mode]...")
         else:
             debug_log(
-                "CHAIN", message="Invoking RAG chain [Document Retrieval Mode]..."
+                "CHAIN", message="Invoking Self-RAG [Multi-Hop Retrieval Mode]..."
             )
+
+    # Initialize empty reasoning trace (will be populated by Self-RAG)
+    reasoning_trace: List[str] = []
 
     try:
         # Invoke chain with proper input structure
-        # The history-aware chain expects dict with "input" and optional "chat_history"
+        # The Self-RAG chain expects dict with "input" and optional "chat_history"
+        # It internally calls core.self_rag.self_rag_query() orchestrator
         answer = rag_chain.invoke(chain_input_dict)
+
+        # Capture reasoning trace from session state (populated by Self-RAG wrapper)
+        if "self_rag_metadata" in st.session_state:
+            reasoning_trace = st.session_state.self_rag_metadata.get(
+                "reasoning_trace", []
+            )
+            if print_debug:
+                debug_log(
+                    "INFO",
+                    "📋",
+                    f"Captured Self-RAG reasoning trace ({len(reasoning_trace)} steps)",
+                )
+
     except Exception as e:
         debug_log("ERROR", message=f"RAG chain failed: {e}")
         answer = f"[STATUS: DOC_MISSING]\nI encountered an error processing your query: {str(e)}"
@@ -786,9 +974,16 @@ def process_user_query(
     answer_clean = answer
     is_general_answer = is_greeting_query
 
-    # Check for tags using robust regex
+    # Check for tags using robust regex.
+    # IMPORTANT: DOC_ANSWER must explicitly reset is_general_answer to False.
+    # Without this, a raw query that matches a greeting pattern (e.g., "Thanks! Tell me
+    # about revenue") would leave is_general_answer=True even when Self-RAG returns a
+    # document-grounded answer, silently suppressing the source citations in the UI.
     if re.search(r"\[STATUS:\s*DOC_ANSWER\]", answer, flags=re.IGNORECASE):
         found_answer = True
+        is_general_answer = (
+            False  # DOC_ANSWER always means document-grounded; show sources
+        )
     elif re.search(r"\[STATUS:\s*DOC_MISSING\]", answer, flags=re.IGNORECASE):
         found_answer = False
         is_general_answer = False
@@ -806,7 +1001,33 @@ def process_user_query(
 
     # Prevent 'Content cannot be empty' DB error if LLM only returned a tag in rare cases
     if not answer_clean:
-        answer_clean = cfg.NOT_FOUND_ANSWER_FALL_BACK
+        if print_debug:
+            debug_log(
+                "INFO",
+                "⚠️",
+                "LLM returned only tags - generating dynamic fallback answer",
+            )
+
+        # Create LLM chain for fallback generation if needed
+        try:
+            from langchain_ollama import OllamaLLM
+
+            settings = load_notebook_settings(notebook_id)
+            llm = OllamaLLM(
+                model=settings.get("llm_model_name", cfg.LLM_MODEL_NAME),
+                base_url=cfg.LLM_BASE_URL,
+                temperature=settings.get("llm_avg_temp", cfg.LLM_AVG_TEMP),
+            )
+            answer_clean = generate_fallback_answer(
+                query,
+                llm,
+                chat_history,
+                print_debug,
+            )
+        except Exception as e:
+            if print_debug:
+                debug_log("WARNING", "⚠️", f"Fallback generation failed: {str(e)[:100]}")
+            answer_clean = cfg.NOT_FOUND_ANSWER_FALL_BACK
 
     if print_debug:
         if found_answer and not is_general_answer:
@@ -831,44 +1052,80 @@ def process_user_query(
         debug_log("INFO", "📎", "Gathering exact retrieved sources for display...")
 
     if not is_general_answer:
-        # Use the exact documents retrieved during the RAG chain invoke
-        source_docs = chain_input_dict.get("__retrieved_docs__", [])
+        # Prefer the sources captured by the Self-RAG pipeline and stored in session state.
+        # chain_input_dict["__retrieved_docs__"] is never populated by self_rag_wrapper()
+        # because the wrapper only writes to st.session_state.self_rag_metadata["sources"].
+        # Using that session state value guarantees we show the exact chunks the winning
+        # candidate was grounded in, not a fresh similarity search on the raw query.
+        self_rag_sources: List[Dict[str, Any]] = []
+        if (
+            getattr(st, "session_state", None)
+            and "self_rag_metadata" in st.session_state
+        ):
+            self_rag_sources = st.session_state.self_rag_metadata.get("sources", [])
 
-        # Fallback just in case they weren't saved
-        if not source_docs:
-            source_docs = retrieve_quality_chunks(
-                vectorstore,
-                query,
-                k=settings["rag_final_context_k"],
-                min_results=settings["rag_retrieval_min_results"],
-                score_threshold=settings["rag_retrieval_score_threshold"],
-                print_debug=print_debug,
-            )
-
-        # Format sources for display
-        for i, doc in enumerate(source_docs, 1):
-            doc_metadata: Dict[str, Any] = doc.metadata  # type: ignore[assignment]
-            source_entry: Dict[str, Any] = {
-                "document": str(doc_metadata.get("document", "Unknown")),
-                "page": str(doc_metadata.get("page", "N/A")),
-                "content": (
-                    doc.page_content[:200] + "..."
-                    if len(doc.page_content) > 200
-                    else doc.page_content
-                ),
-            }
-            sources.append(source_entry)
+        if self_rag_sources:
+            sources = self_rag_sources
             if print_debug:
                 debug_log(
                     "INFO",
-                    message=f"• Source {i}: {source_entry['document']} (Page {source_entry['page']})",
+                    "📎",
+                    f"Using {len(sources)} sources from Self-RAG winning candidate",
                 )
+        else:
+            # Fallback: Self-RAG metadata unavailable (e.g., error path), do a fresh retrieval.
+            source_docs = retrieve_quality_chunks(
+                vectorstore,
+                query,
+                k=int(settings["rag_final_context_k"]),
+                min_results=int(settings["rag_retrieval_min_results"]),
+                score_threshold=float(settings["rag_retrieval_score_threshold"]),
+                print_debug=print_debug,
+                settings=settings,
+            )
+
+            # Format sources for display
+            for i, doc in enumerate(source_docs, 1):
+                doc_metadata: Dict[str, Any] = doc.metadata  # type: ignore[assignment]
+                source_entry: Dict[str, Any] = {
+                    "document": str(doc_metadata.get("document", "Unknown")),
+                    "page": str(doc_metadata.get("page", "N/A")),
+                    "content": (
+                        doc.page_content[:200] + "..."
+                        if len(doc.page_content) > 200
+                        else doc.page_content
+                    ),
+                }
+                sources.append(source_entry)
+                if print_debug:
+                    debug_log(
+                        "INFO",
+                        message=f"• Source {i}: {source_entry['document']} (Page {source_entry['page']})",
+                    )
 
         if print_debug:
             print_breaker()
             debug_log("INFO", "📎", f"Processed {len(sources)} display sources for UI")
 
-    return answer_clean, sources, found_answer
+    confidence_score = None
+    if getattr(st, "session_state", None) and hasattr(
+        st.session_state, "self_rag_metadata"
+    ):
+        confidence_metrics = st.session_state.self_rag_metadata.get(
+            "confidence_metrics", {}
+        )
+        if "total_score" in confidence_metrics:
+            try:
+                confidence_score = float(confidence_metrics["total_score"])
+            except (ValueError, TypeError):
+                pass
+        elif "issup" in confidence_metrics:
+            try:
+                confidence_score = float(confidence_metrics["issup"])
+            except (ValueError, TypeError):
+                pass
+
+    return answer_clean, sources, found_answer, reasoning_trace, confidence_score
 
 
 def save_query_and_answer_to_history(
@@ -993,6 +1250,109 @@ def try_load_cross_encoder() -> Any:
             return None
 
 
+def rerank_with_cross_encoder(
+    query: str,
+    candidates: List[Document],
+    top_k: int,
+    print_debug: bool = False,
+) -> List[Document]:
+    """Execute two-stage retrieval reranking."""
+    if len(candidates) <= top_k:
+        return candidates
+
+    import streamlit as st
+
+    if "cross_encoder_model" not in st.session_state:
+        st.session_state.cross_encoder_model = try_load_cross_encoder()
+
+    model = st.session_state.cross_encoder_model
+
+    if not model:
+        if print_debug:
+            debug_log("WARNING", "⚠️", "Cross-Encoder unavailable. Skipping reranking.")
+        return candidates[:top_k]
+
+    pairs = [[query, doc.page_content] for doc in candidates]
+    if print_debug:
+        debug_log(
+            "INFO", "⚖️", f"Re-ranking {len(candidates)} chunks with Cross-Encoder..."
+        )
+
+    try:
+        scores = model.predict(pairs, batch_size=32, show_progress_bar=False)
+    except Exception as rerank_err:
+        # CUDA OOM (or other GPU failure) during predict — evict the cached model so it
+        # frees VRAM and will be re-initialized on the next call, then fall back to the
+        # existing similarity scores so the current iteration can still proceed.
+        if print_debug:
+            debug_log(
+                "WARNING",
+                "⚠️",
+                f"Cross-Encoder reranking failed ({str(rerank_err)[:100]}). "
+                "Evicting cached model and falling back to similarity score order.",
+            )
+        # Remove the broken/OOM model from session state so it is reloaded fresh later
+        if "cross_encoder_model" in st.session_state:
+            del st.session_state.cross_encoder_model
+        # Sort by existing FAISS L2 similarity scores (lower = closer = better)
+        candidates.sort(
+            key=lambda x: float(
+                cast(Dict[str, Any], getattr(x, "metadata")).get(
+                    "similarity_score", 999.0
+                )
+            )
+        )
+        return candidates[:top_k]
+
+    for doc, score in zip(candidates, scores):
+        cast(Dict[str, Any], getattr(doc, "metadata"))["rerank_score"] = float(score)
+
+    candidates.sort(
+        key=lambda x: float(
+            cast(Dict[str, Any], getattr(x, "metadata")).get("rerank_score", 0.0)
+        ),
+        reverse=True,
+    )
+    return candidates[:top_k]
+
+
+def _get_or_create_bm25_retriever(vectorstore: Any, print_debug: bool = False) -> Any:
+    """Gets cached BM25 retriever or creates a new one based on vectorstore doc chunks."""
+    import streamlit as st
+
+    try:
+        from langchain_community.retrievers import BM25Retriever
+    except ImportError:
+        if print_debug:
+            debug_log("ERROR", message="BM25 package not found.")
+        return None
+
+    # Use chunk keys to represent the current corpus signature
+    chunk_keys = tuple(sorted(vectorstore.docstore._dict.keys()))
+    current_signature = hash(chunk_keys)
+
+    if (
+        "bm25_retriever" in st.session_state
+        and "bm25_signature" in st.session_state
+        and st.session_state.bm25_signature == current_signature
+    ):
+        return st.session_state.bm25_retriever
+
+    if print_debug:
+        debug_log("INFO", "⚙️", "Initializing BM25 Retriever from vectorstore chunks...")
+
+    docs = list(vectorstore.docstore._dict.values())
+    if not docs:
+        return None
+
+    bm25 = BM25Retriever.from_documents(docs)
+
+    st.session_state.bm25_retriever = bm25
+    st.session_state.bm25_signature = current_signature
+
+    return bm25
+
+
 def retrieve_quality_chunks(
     vectorstore: FAISS,
     query: str,
@@ -1000,6 +1360,7 @@ def retrieve_quality_chunks(
     min_results: int = cfg.RAG_RETRIEVAL_MIN_RESULTS,
     score_threshold: float = cfg.RAG_RETRIEVAL_SCORE_THRESHOLD,
     print_debug: bool = False,
+    settings: Optional[Dict[str, Any]] = None,
 ) -> List[Document]:
     """
     Retrieve document chunks with quality-based filtering and fallback guarantees.
@@ -1025,20 +1386,101 @@ def retrieve_quality_chunks(
         L2 distance metric used by FAISS: lower distance = higher similarity.
         Values typically range 4.0-6.0 for moderate semantic relevance.
     """
+    settings = settings or {}
+    weight_semantic = float(settings.get("weight_semantic", cfg.WEIGHT_SEMANTIC))
+    weight_bm25 = float(settings.get("weight_bm25", cfg.WEIGHT_BM25))
+
+    SEARCH_MODE_BM25 = "BM25 Keyword Search"
+
+    # Evaluate Gatekeeper Hybrid Configuration
+    if weight_bm25 <= 0.0 or weight_semantic >= 1.0:
+        search_mode = "Semantic Search"
+    elif weight_semantic <= 0.0 or weight_bm25 >= 1.0:
+        search_mode = SEARCH_MODE_BM25
+    else:
+        search_mode = "Hybrid Search"
+
     if print_debug:
         debug_log(
             "INFO",
             "🔎",
-            f"Retrieving quality chunks from {k} total results with the threshold of {score_threshold} and min fallback of {min_results}",
+            f"{search_mode} | Threshold: {score_threshold} | Fallback: {min_results}",
         )
 
     # Step 1: Get top K results with scores
-    results_with_scores: List[Any] = vectorstore.similarity_search_with_score(  # pyright: ignore[reportUnknownMemberType]
-        query, k=k
-    )
+    if search_mode == "Semantic Search":
+        results_with_scores: List[Any] = vectorstore.similarity_search_with_score(  # pyright: ignore[reportUnknownMemberType]
+            query, k=k
+        )
+    else:
+        bm25_retriever = _get_or_create_bm25_retriever(vectorstore, print_debug)
+        if not bm25_retriever:
+            debug_log(
+                "WARNING",
+                message="BM25 Initialization failed. Falling back to Semantic Search.",
+            )
+            results_with_scores = vectorstore.similarity_search_with_score(query, k=k)  # pyright: ignore[reportUnknownMemberType]
+        elif search_mode == SEARCH_MODE_BM25:
+            bm25_retriever.k = k
+            bm25_docs = bm25_retriever.invoke(query)
+            if bm25_docs:
+                # Cross-check BM25 results with semantic scores so that
+                # rag_retrieval_score_threshold can meaningfully filter BM25 results.
+                # Without this, all BM25 docs get score=0.0 and always pass the threshold.
+                sem_score_map = {
+                    hash(doc.page_content[:100]): score
+                    for doc, score in vectorstore.similarity_search_with_score(  # pyright: ignore[reportUnknownMemberType]
+                        query, k=k * 2
+                    )
+                }
+                results_with_scores = [
+                    (
+                        doc,
+                        sem_score_map.get(
+                            hash(doc.page_content[:100]), score_threshold + 1.0
+                        ),
+                    )
+                    for doc in bm25_docs
+                ]
+            else:
+                results_with_scores = []
+        else:
+            # Hybrid Search: fuse Semantic + BM25 via Reciprocal Rank Fusion (RRF)
+            from langchain_classic.retrievers.ensemble import EnsembleRetriever
+            from langchain_core.retrievers import BaseRetriever
+            from langchain_core.callbacks import CallbackManagerForRetrieverRun
 
-    if print_debug:
-        debug_log("INFO", message=f"Total search results: {len(results_with_scores)}")
+            class CustomFAISSRetriever(BaseRetriever):
+                vectorstore: Any
+                k: int
+                score_threshold: float
+
+                def _get_relevant_documents(
+                    self, query: str, *, run_manager: CallbackManagerForRetrieverRun
+                ):
+                    results = self.vectorstore.similarity_search_with_score(
+                        query, k=self.k
+                    )
+                    docs: List[Document] = []
+                    for doc, score in results:
+                        if score <= self.score_threshold:
+                            docs.append(doc)
+                    return docs
+
+            bm25_retriever.k = k * 2
+            base_retriever = CustomFAISSRetriever(
+                vectorstore=vectorstore, k=k * 2, score_threshold=score_threshold
+            )
+            ensemble = EnsembleRetriever(
+                retrievers=[base_retriever, bm25_retriever],
+                weights=[weight_semantic, weight_bm25],
+                c=cfg.RRF_C,
+            )
+            hybrid_docs = ensemble.invoke(query)
+
+            # All hybrid docs have already been quality-filtered through CustomFAISSRetriever;
+            # assign synthetic passing score so the threshold step below remains a no-op.
+            results_with_scores = [(doc, 0.0) for doc in hybrid_docs]
 
     # Step 2: Filter by quality threshold (lower distance = better match)
     filtered_results: List[Document] = []
@@ -1060,52 +1502,98 @@ def retrieve_quality_chunks(
     if print_debug:
         debug_log(
             "INFO",
-            "✅",
-            f"Passed threshold ({score_threshold}): {passed_threshold} chunks",
+            "ℹ️",
+            f"Quality filter: {passed_threshold} passed, {failed_threshold} failed (Total: {len(results_with_scores)})",
         )
-        debug_log("INFO", "❌", f"Failed threshold: {failed_threshold} chunks")
 
     # Step 3: Fallback mechanism - if threshold filtered too much, use top min_results
     if len(filtered_results) < min_results:
         if print_debug:
             debug_log(
                 "WARNING",
-                message=f"Only {len(filtered_results)} chunks passed threshold. Falling back to top {min_results} results...",
+                "⚠️",
+                f"Only {len(filtered_results)} chunks passed threshold (needed {min_results}). Using top {min_results} results as fallback.",
             )
-
+        # Take the top min_results from the original sorted results
         filtered_results = []
         for doc, score in results_with_scores[:min_results]:
-            doc.metadata["similarity_score"] = score
-            doc.metadata["passed_quality_threshold"] = False
             filtered_results.append(doc)
+            cast(Dict[str, Any], getattr(doc, "metadata"))[
+                "passed_quality_threshold"
+            ] = score <= score_threshold
+
+    if search_mode == SEARCH_MODE_BM25 and len(filtered_results) == 0:
+        if print_debug:
+            debug_log(
+                "WARNING",
+                "⚠️",
+                "BM25 Keyword Search returned 0 chunks. Falling back to Semantic Search (vector).",
+            )
+
+        # Fallback to Semantic Search
+        sem_results = vectorstore.similarity_search_with_score(query, k=k)  # pyright: ignore[reportUnknownMemberType]
+
+        filtered_results = []
+        passed_threshold = 0
+        failed_threshold = 0
+        for doc, score in sem_results:
+            cast(Dict[str, Any], getattr(doc, "metadata"))["similarity_score"] = score
+            if score <= score_threshold:
+                filtered_results.append(doc)
+                cast(Dict[str, Any], getattr(doc, "metadata"))[
+                    "passed_quality_threshold"
+                ] = True
+                passed_threshold += 1
+            else:
+                cast(Dict[str, Any], getattr(doc, "metadata"))[
+                    "passed_quality_threshold"
+                ] = False
+                failed_threshold += 1
+
+        if len(filtered_results) < min_results:
+            filtered_results = []
+            for doc, score in sem_results[:min_results]:
+                filtered_results.append(doc)
+
+    if search_mode == "Hybrid Search" and len(filtered_results) == 0:
+        if print_debug:
+            debug_log(
+                "WARNING",
+                "⚠️",
+                "Hybrid Search returned 0 chunks. Falling back to pure Semantic Search (vector).",
+            )
+
+        # Fallback to Semantic Search
+        sem_results = vectorstore.similarity_search_with_score(query, k=k)  # pyright: ignore[reportUnknownMemberType]
+
+        filtered_results = []
+        for doc, score in sem_results:
+            cast(Dict[str, Any], getattr(doc, "metadata"))["similarity_score"] = score
+            if score <= score_threshold:
+                filtered_results.append(doc)
+                cast(Dict[str, Any], getattr(doc, "metadata"))[
+                    "passed_quality_threshold"
+                ] = True
+            else:
+                cast(Dict[str, Any], getattr(doc, "metadata"))[
+                    "passed_quality_threshold"
+                ] = False
+
+        if len(filtered_results) < min_results:
+            filtered_results = []
+            for doc, score in sem_results[:min_results]:
+                filtered_results.append(doc)
+
+    if len(filtered_results) == 0 and print_debug:
+        debug_log(
+            "WARNING",
+            message="0 chunks passed the quality threshold and min_results. Returning empty list.",
+        )
 
     if print_debug:
         debug_log(
             "INFO", "✅", f"Final retrieved chunks for display: {len(filtered_results)}"
         )
-        print_breaker()
-
-        for i, doc in enumerate(filtered_results, 1):
-            doc_metadata: Dict[str, Any] = doc.metadata  # type: ignore[assignment]
-            score = doc_metadata.get("similarity_score", "N/A")
-
-            # Extract clean filename
-            doc_name = doc_metadata.get(
-                "source", doc_metadata.get("document", "Unknown")
-            )
-            if "/" in str(doc_name) or "\\" in str(doc_name):
-                doc_name = Path(doc_name).name
-
-            page_num = doc_metadata.get("page", "N/A")
-            content_preview = doc.page_content[:85].replace("\n", " ").strip()
-            score_str = f"{score:.4f}" if isinstance(score, float) else str(score)
-
-            debug_log(
-                "INFO",
-                "📄",
-                f'[{i}] L2 Distance: {score_str} | {doc_name} (Page {page_num}): "{content_preview}"...',
-            )
-
         print_breaker()
 
     return filtered_results
@@ -1195,6 +1683,10 @@ def reload_vectorstore_and_chain(
     )
 
     if st.session_state.vectorstore is not None:
+        from core.self_rag import (
+            create_history_aware_rag_chain,
+        )  # lazy import avoids circular dependency
+
         st.session_state.rag_chain = create_history_aware_rag_chain(
             st.session_state.vectorstore,
             print_debug=print_debug,
@@ -1286,6 +1778,7 @@ def is_greeting(user_query: str) -> bool:
 
     Supports: English, Vietnamese, and Mandarin Chinese with automatic language detection.
     Falls back to English patterns if language detection fails.
+    Handles edge cases like repeated characters ("heeey" → "hey").
 
     Args:
         user_query: The user's input text
@@ -1296,13 +1789,17 @@ def is_greeting(user_query: str) -> bool:
     query_lower = clean_spaces(user_query.lower())
 
     try:
-        # Detect language
+        # Detect language (use original query for language detection)
         detected_lang: str = str(detect(query_lower))  # type: ignore[misc]
 
         # Map detected language codes to our supported languages
-        # langdetect uses ISO 639-1 codes: 'en', 'vi', 'zh-cn', 'zh-tw', etc.
+        # langdetect uses ISO 639-1 codes: 'en', 'vi', 'zh-cn', 'zh-tw', 'ko', etc.
         if detected_lang.startswith("zh"):
             lang_code = "zh"  # Both Simplified and Traditional Chinese
+        elif detected_lang == "ko":
+            # Korean detection can be ambiguous with Chinese for short greetings
+            # Use Chinese patterns as fallback for these ambiguous cases
+            lang_code = "zh"
         elif detected_lang in ("en", "vi"):
             lang_code = detected_lang
         else:
@@ -1314,8 +1811,15 @@ def is_greeting(user_query: str) -> bool:
             lang_code, cfg.DEFAULT_EN_GREETING_PATTERNS
         )
 
+        # Try to match against original query first
         for pattern in patterns:
             if re.match(pattern, query_lower):
+                return True
+
+        # If no match with original query, try with normalized query (repeated characters removed)
+        query_normalized = re.sub(r"(.)\1+", r"\1", query_lower)
+        for pattern in patterns:
+            if re.match(pattern, query_normalized):
                 return True
 
         return False
@@ -1326,8 +1830,15 @@ def is_greeting(user_query: str) -> bool:
             "WARNING",
             message=f"Language detection failed: {e}. Using English patterns as fallback.",
         )
+        # Try original query first
         for pattern in cfg.DEFAULT_EN_GREETING_PATTERNS:
             if re.match(pattern, query_lower):
+                return True
+
+        # Try normalized query
+        query_normalized = re.sub(r"(.)\1+", r"\1", query_lower)
+        for pattern in cfg.DEFAULT_EN_GREETING_PATTERNS:
+            if re.match(pattern, query_normalized):
                 return True
         return False
 
@@ -1353,405 +1864,15 @@ def format_chat_history_for_rephrase(
     # Use only the latest max_messages to avoid context overflow
     for msg in chat_history[-max_messages:]:
         if msg["role"] == cfg.USER_ROLE_NAME:
+            from langchain_core.messages import HumanMessage
+
             messages.append(HumanMessage(content=msg["content"]))
         elif msg["role"] == cfg.ASSISTANT_ROLE_NAME:
+            from langchain_core.messages import AIMessage
+
             messages.append(AIMessage(content=msg["content"]))
 
     return messages
-
-
-def create_history_aware_rag_chain(
-    vectorstore: FAISS,
-    print_debug: bool = False,
-    notebook_id: Optional[str] = None,
-) -> Any:
-    """
-    Build a production-ready history-aware RAG chain with hybrid search capability.
-
-    This is the core RAG orchestration function. It constructs a sophisticated pipeline that:
-    1. Uses chat history to rephrase questions for better retrieval
-    2. Implements a "Gatekeeper" pattern to choose Pure Semantic, Pure Keyword, or Hybrid search
-    3. Retrieves context with quality-based threshold filtering and fallback guarantees
-    4. Formats context with source citations
-    5. Generates answers using LLM with document context + general knowledge fallback
-
-    Args:
-        vectorstore: FAISS vectorstore containing indexed documents.
-        print_debug: Enable detailed debug logging of chain execution.
-        notebook_id: UUID of the notebook for loading custom RAG settings.
-
-    Returns:
-        Any: Runnable RAG chain that accepts {"input": question, "chat_history": [...]} (optional)
-             and returns the final answer string.
-
-    Pipeline Flow:
-        Question + History → Rephrase → Quality Retriever → Context Formatter → Enhanced Prompt → LLM → Answer
-
-    Hybrid Search Modes (controlled by weight_semantic and weight_bm25 settings):
-        - Pure Semantic (weight_bm25 = 0.0): FAISS vector similarity only
-        - Pure Keyword (weight_semantic = 0.0): BM25 lexical matching only
-        - Hybrid (both > 0.0): EnsembleRetriever with RRF (Reciprocal Rank Fusion)
-
-    Note:
-        Uses Streamlit session_state to cache the expensive BM25 tokenizer.
-        Automatically invalidates cache when vectorstore content or notebook changes.
-    """
-    from langchain_core.output_parsers import StrOutputParser
-    from langchain_ollama import OllamaLLM
-    from langchain_core.prompts import MessagesPlaceholder
-    import streamlit as st
-    from langchain_core.retrievers import BaseRetriever
-    from langchain_core.callbacks import CallbackManagerForRetrieverRun
-    from pydantic import Field
-    from langchain_community.retrievers import BM25Retriever
-    from langchain_classic.retrievers import EnsembleRetriever
-
-    if print_debug:
-        print("\n")
-        debug_log("INFO", "🛠️", "Building History-Aware RAG Chain...")
-
-    settings = _load_notebook_settings(notebook_id)
-
-    class CustomFAISSRetriever(BaseRetriever):
-        vectorstore: Any = Field(description="FAISS vectorstore")
-        settings_dict: Dict[str, Any] = Field(description="Settings dict")
-        print_debug: bool = Field(default=False)
-
-        def _get_relevant_documents(
-            self, query: str, *, run_manager: CallbackManagerForRetrieverRun
-        ) -> List[Document]:
-            return retrieve_quality_chunks(
-                self.vectorstore,
-                query,
-                k=int(self.settings_dict["rag_rerank_top_n"]),
-                min_results=int(self.settings_dict["rag_retrieval_min_results"]),
-                score_threshold=float(
-                    self.settings_dict["rag_retrieval_score_threshold"]
-                ),
-                print_debug=self.print_debug,
-            )
-
-    # Step 1: Create hybrid/quality-based retriever implementations
-    k_val = int(settings["rag_final_context_k"])
-    rerank_n = int(settings["rag_rerank_top_n"])
-    weight_semantic = float(settings["weight_semantic"])
-    weight_bm25 = float(settings["weight_bm25"])
-    min_results = int(settings["rag_retrieval_min_results"])
-
-    # Provide FAISS Semantic Base Retriever
-    faiss_retriever = CustomFAISSRetriever(
-        vectorstore=vectorstore, settings_dict=settings, print_debug=print_debug
-    )
-
-    # Build or Load BM25 Retriever from Streamlit Cache (The "Cold Start" Strategy)
-    current_doc_count = len(vectorstore.index_to_docstore_id)
-    current_vs_id = id(vectorstore)
-
-    rebuild_bm25 = (
-        "bm25_retriever" not in st.session_state
-        or st.session_state.get("bm25_doc_count") != current_doc_count
-        or st.session_state.get("bm25_vs_id") != current_vs_id
-        or st.session_state.get("bm25_notebook_id") != notebook_id
-    )
-
-    if rebuild_bm25:
-        if print_debug:
-            debug_log(
-                "INFO", "⚙️", "Building/Rebuilding BM25Retriever from FAISS docstore..."
-            )
-        all_docs_ids = vectorstore.index_to_docstore_id.values()
-        all_docs = [
-            doc
-            for doc_id in all_docs_ids
-            if isinstance((doc := vectorstore.docstore.search(doc_id)), Document)
-        ]
-        if len(all_docs) > 0:
-            bm25 = BM25Retriever.from_documents(all_docs)
-            bm25.k = rerank_n
-            st.session_state["bm25_retriever"] = bm25
-        else:
-            st.session_state["bm25_retriever"] = None
-
-        st.session_state["bm25_doc_count"] = current_doc_count
-        st.session_state["bm25_vs_id"] = current_vs_id
-        st.session_state["bm25_notebook_id"] = notebook_id
-
-    bm25_retriever = st.session_state.get("bm25_retriever")
-    if bm25_retriever:
-        bm25_retriever.k = rerank_n  # update k dynamically to user settings
-
-    # The Gatekeeper Architectural Flow
-    hybrid_retriever: Any = None
-    if bm25_retriever is None or abs(weight_bm25) < 1e-5:
-        if print_debug:
-            debug_log(
-                "INFO",
-                "🧩",
-                f"Initialized Pure Semantic Mode (Weight Semantic={weight_semantic:.2f} / Weight BM25=0.00)",
-            )
-        hybrid_retriever = faiss_retriever
-    elif abs(weight_semantic) < 1e-5:
-        if print_debug:
-            debug_log(
-                "INFO",
-                "🧩",
-                f"Initialized Pure Keyword Mode (Weight Semantic=0.00 / Weight BM25={weight_bm25:.2f})",
-            )
-        hybrid_retriever = bm25_retriever
-    else:
-        if print_debug:
-            debug_log(
-                "INFO",
-                "🧩",
-                f"Initialized Hybrid Ensemble Mode (Weight Semantic={weight_semantic:.2f} / Weight BM25={weight_bm25:.2f})",
-            )
-        hybrid_retriever = EnsembleRetriever(
-            retrievers=[faiss_retriever, bm25_retriever],
-            weights=[weight_semantic, weight_bm25],
-            c=cfg.RRF_C,
-        )
-
-    def quality_retriever(query: str) -> List[Document]:
-        if print_debug:
-            print_breaker()
-            debug_log("INFO", "🔍", f'Executing retrieval with query: "{query}"')
-            if bm25_retriever is None or abs(weight_bm25) < 1e-5:
-                debug_log(
-                    "INFO",
-                    "🧩",
-                    f"Executing Pure Semantic Search (Weight Semantic: {weight_semantic:.2f} / Weight BM25: 0.00)",
-                )
-            elif abs(weight_semantic) < 1e-5:
-                debug_log(
-                    "INFO",
-                    "🧩",
-                    f"Executing Pure Keyword Search (Weight Semantic: 0.00 / Weight BM25: {weight_bm25:.2f})",
-                )
-            else:
-                debug_log(
-                    "INFO",
-                    "🧩",
-                    f"Executing Hybrid Ensemble Search (Weight Semantic: {weight_semantic:.2f} / Weight BM25: {weight_bm25:.2f})",
-                )
-            print_breaker()
-
-        docs: List[Document] = hybrid_retriever.invoke(query)
-
-        # Enforce exact top_k limit because EnsembleRetriever fuses lists and might return 2 * rerank_n elements
-        if len(docs) > rerank_n:
-            docs = docs[:rerank_n]
-
-        # Stage 2: Cross-Encoder Re-ranking
-        if len(docs) > k_val:
-            cross_encoder = try_load_cross_encoder()
-            if cross_encoder:
-                if print_debug:
-                    debug_log(
-                        "INFO",
-                        "🧠",
-                        f"Re-ranking {len(docs)} chunks with Cross-Encoder...",
-                    )
-
-                # Create query-chunk pairs
-                pairs = [[query, doc.page_content] for doc in docs]
-
-                # Get and assign scores
-                scores = cross_encoder.predict(pairs)
-                for doc, score in zip(docs, scores):
-                    meta: Dict[str, Any] = getattr(doc, "metadata")
-                    meta["cross_encoder_score"] = float(score)
-
-                # Sort documents by cross_encoder_score descending
-                docs.sort(
-                    key=lambda d: float(
-                        cast(Dict[str, Any], getattr(d, "metadata")).get(
-                            "cross_encoder_score", -999.0
-                        )
-                    ),
-                    reverse=True,
-                )
-
-                # Truncate to final context K
-                docs = docs[:k_val]
-
-                if print_debug:
-                    debug_log(
-                        "INFO",
-                        "✅",
-                        f"Re-ranking complete. Sliced down to top {k_val} chunks.",
-                    )
-            else:
-                if print_debug:
-                    debug_log(
-                        "WARNING",
-                        message="Cross-Encoder model is not available. Falling back to Stage 1 results.",
-                    )
-                docs = docs[:k_val]
-        else:
-            if print_debug and len(docs) > 0:
-                debug_log(
-                    "INFO",
-                    "⏭️",
-                    f"Skipping Re-ranking: Number of retrieved chunks ({len(docs)}) is <= final context limit ({k_val}).",
-                )
-
-        # Fallback & Min Guarantee logic
-        if len(docs) < min_results:
-            if print_debug:
-                debug_log(
-                    "WARNING",
-                    message=f"Hybrid/Keyword Search returned {len(docs)} chunks. Triggering Fallback to Pure Semantic Search with relaxed threshold to guarantee at least {min_results} results.",
-                )
-
-            # Lower score threshold or run pure similarity
-            fallback_docs = retrieve_quality_chunks(
-                vectorstore,
-                query,
-                k=min_results,
-                min_results=min_results,
-                score_threshold=100.0,
-                print_debug=print_debug,
-            )
-            return fallback_docs
-
-        return docs
-
-    # Step 2: Initialize LLM
-    llm = OllamaLLM(
-        model=str(settings["llm_model_name"]),
-        base_url=cfg.OLLAMA_BASE_URL,
-        temperature=float(settings["llm_temp"]),
-        num_ctx=int(settings["llm_num_ctx"]),
-    )
-
-    # Step 3: Create history-aware retriever prompt with domain awareness
-    # Optimized to better leverage chat history for question reformulation
-    rephrase_prompt: ChatPromptTemplate = ChatPromptTemplate.from_messages(  # type: ignore[misc]
-        [
-            (
-                "system",
-                cfg.REPHRASE_PROMPT,
-            ),
-            MessagesPlaceholder("chat_history"),
-            ("human", "{input}"),
-        ]
-    )
-
-    # Step 4: Standalone Question Reformulator
-    # Rephrase the question using chat history if available, else keep the original
-    from langchain_core.runnables import RunnableBranch, RunnablePassthrough
-
-    def check_has_history(x: Dict[str, Any]) -> bool:
-        """Check if dictionary has chat history."""
-        return bool(x.get("chat_history", []))
-
-    def get_query_str(q: Any) -> str:
-        if isinstance(q, dict):
-            # For the reformulator, pull the raw input/question string
-            q_dict: Dict[str, Any] = q  # pyright: ignore[reportUnknownVariableType]
-            return str(q_dict.get("input", q_dict.get("question", "")))
-        return str(q)
-
-    def extract_rephrased_question(rephraser_output: Any) -> str:
-        # StrOutputParser returns a string. But just to be sure we pull a clean string
-        # we parse it out in case it's an AIMessage.
-        if hasattr(rephraser_output, "content"):
-            return str(rephraser_output.content).strip()
-        return str(rephraser_output).strip()
-
-    # Branch automatically executes the rephrase prompt if history is present
-    question_rephraser: Any = RunnableBranch(  # pyright: ignore[reportUnknownVariableType]
-        (
-            check_has_history,
-            rephrase_prompt
-            | llm
-            | StrOutputParser()
-            | RunnableLambda(extract_rephrased_question),
-        ),
-        RunnableLambda(get_query_str),
-    )
-
-    # Step 5: Create enhanced prompt template with time and general knowledge permission
-    custom_instructions = settings.get("personal_ctx", None)
-    sys_prompt_raw: str = cfg.get_sys_prompt(
-        custom_instructions=str(custom_instructions) if custom_instructions else None
-    )
-
-    # Extract the system portion by cleaning out the hardcoded user question block
-    # so we can use a proper conversational Messages format
-    clean_sys_prompt = re.sub(
-        r"<user_question>.*?</user_question>\n*YOUR ANSWER:?",
-        "",
-        sys_prompt_raw,
-        flags=re.DOTALL,
-    )
-
-    qa_prompt: Any = ChatPromptTemplate.from_messages(  # pyright: ignore[reportUnknownMemberType]
-        [
-            ("system", clean_sys_prompt),
-            MessagesPlaceholder("chat_history"),
-            ("human", "{question}"),
-        ]
-    )
-
-    def retrieve_and_format_context(x: Dict[str, Any]) -> str:
-        # CRITICAL OPTIMIZATION: If the query is detected strictly as a greeting,
-        # simply route it cleanly around the FAISS retrieval mechanics.
-        # This completely skips useless embedding retrieval but preserves LLM context formatting!
-        rephrased_q = str(x.get("rephrased_question", ""))
-
-        # Test BOTH the original query and the newly reformulated query!
-        if x.get("is_greeting", False) or is_greeting(rephrased_q):
-            return format_context_with_sources(docs=[], print_debug=print_debug)
-
-        docs = quality_retriever(rephrased_q)
-
-        if "__retrieved_docs__" in x:
-            retrieved_docs: Any = x["__retrieved_docs__"]
-            if isinstance(retrieved_docs, list):
-                retrieved_docs.extend(docs)  # type: ignore[reportUnknownMemberType, reportUnknownArgumentType]
-
-        return format_context_with_sources(
-            docs=docs,
-            print_debug=print_debug,
-        )
-
-    def build_final_prompt_dict(x: Dict[str, Any]) -> Dict[str, Any]:
-        """Map variables explicitly to the final qa_prompt structure."""
-        current_question = get_query_str(x)
-        rephrased_q = str(x.get("rephrased_question", ""))
-
-        if print_debug and current_question != rephrased_q:
-            debug_log("INFO", "🧠", f'Contextual Question Formed: "{rephrased_q}"')
-
-        # Ensure we don't accidentally drop the is_greeting flag or other metadata
-        return {
-            "context": str(x.get("context", "")),
-            "question": rephrased_q,
-            "chat_history": x.get("chat_history", []),
-        }
-
-    # A single dynamic Rag Chain that uses history if provided, bypasses FAISS for greetings,
-    # and natively passes the contextualized question directly to the final QA LLM
-    rag_chain: Any = (
-        RunnablePassthrough.assign(rephrased_question=question_rephraser)
-        | RunnablePassthrough.assign(
-            context=RunnableLambda(retrieve_and_format_context)
-        )
-        | RunnableLambda(build_final_prompt_dict)
-        | qa_prompt
-        | llm
-        | StrOutputParser()
-    )
-
-    if print_debug:
-        debug_log(
-            "INFO",
-            "🚀",
-            "Advanced RAG Chain created: Question + History → Rephrase → Quality Retriever → Context Formatter → Enhanced Prompt → LLM → Answer",
-        )
-
-    return rag_chain
 
 
 def get_installed_ollama_models() -> List[str]:

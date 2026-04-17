@@ -4,6 +4,7 @@ SmartDoc AI - Local NotebookLM-Inspired Document Intelligence System
 A privacy-first RAG application for querying documents with source citations.
 """
 
+import re
 import time
 import html
 
@@ -11,7 +12,7 @@ import streamlit as st
 import os
 import logging
 import uuid
-from typing import List, Dict, Any, Optional, Callable
+from typing import List, Dict, Any, Optional, Callable, Tuple
 from pathlib import Path
 
 from middlewares import db_middleware
@@ -26,8 +27,8 @@ from core.utils import (
     check_file_already_exists_in_notebook,
     reload_vectorstore_and_chain,
     get_source_vectorstore_dir,
-    create_history_aware_rag_chain,
 )
+from core.self_rag import create_history_aware_rag_chain
 
 # ============================================================================
 # LOGGING CONFIGURATION
@@ -49,6 +50,7 @@ logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
 DATA_DIR = Path("data")
 
 DATA_DIR.mkdir(exist_ok=True)
+CHUNKS_PROGRESS_REGEX = r"chunks \d+ to (\d+) of (\d+)"
 
 # ============================================================================
 # PAGE CONFIGURATION
@@ -64,16 +66,16 @@ st.markdown(
     """
 <style>
     /* Progress Bar */
-    div[data-testid="stProgress"] {
+    div[data-testid="stProgressBar"] {
         height: 6px !important;
         margin-bottom: 10px;
     }
     /* The track (background) of the progress bar */
-    div[data-testid="stProgress"] > div > div {
+    div[data-testid="stProgressBar"] > div > div {
         background-color: rgba(128, 128, 128, 0.2) !important;
     }
     /* The filled portion of the progress bar */
-    div[data-testid="stProgress"] > div > div > div > div {
+    div[data-testid="stProgressBar"] > div > div > div > div {
         background-color: var(--primary-color) !important;
     }
     .progress-status-text {
@@ -382,7 +384,7 @@ def generate_summary(chunks: List[Document], notebook_id: str) -> str:
         llm = OllamaLLM(
             model=settings["llm_model_name"],
             base_url=cfg.OLLAMA_BASE_URL,
-            temperature=settings["llm_temp"],
+            temperature=settings["llm_avg_temp"],
             num_ctx=settings["llm_num_ctx"],
         )
 
@@ -426,7 +428,7 @@ def generate_suggested_questions(chunks: List[Document], notebook_id: str) -> Li
         llm = OllamaLLM(
             model=settings["llm_model_name"],
             base_url=cfg.OLLAMA_BASE_URL,
-            temperature=settings["llm_temp"],
+            temperature=settings["llm_avg_temp"],
             num_ctx=settings["llm_num_ctx"],
         )
 
@@ -561,7 +563,7 @@ def process_file(
             if progress_callback:
                 progress_callback("Creating vector store...")
             new_vectorstore = create_vectorstore_from_chunks(
-                chunks, embeddings, print_debug
+                chunks, embeddings, print_debug, progress_callback=progress_callback
             )
 
             # Setup Database / File Paths mapping
@@ -579,27 +581,25 @@ def process_file(
             # Langchain's FAISS `merge_from` empties the target index natively.
             new_vectorstore.save_local(vectorstore_path)
 
-            # Merge or create, then recreate RAG chain for summary/question generation
+            # Merge into the current session vectorstore (or create if first upload)
             st.session_state.vectorstore = merge_vectorstores(
                 st.session_state.vectorstore, new_vectorstore, print_debug
             )
-            # Use history-aware RAG chain (with or without history)
-            st.session_state.rag_chain = create_history_aware_rag_chain(
-                vectorstore=st.session_state.vectorstore,
-                print_debug=print_debug,
-                notebook_id=notebook_id,
-            )
+            # NOTE: Do NOT rebuild the RAG chain here — reload_vectorstore_and_chain()
+            # below already rebuilds it once with the final selected sources set.
 
             # Generate summary
             if print_debug:
-                debug_log("PROCESS_START", message=f"Generating summary for {filename}")
+                debug_log(
+                    "PROCESS_START", message=f'Generating summary for "{filename}"'
+                )
             summary = generate_summary(chunks, notebook_id=notebook_id)
 
             # Generate suggested questions
             if print_debug:
                 debug_log(
                     "PROCESS_START",
-                    message=f"Generating suggested questions for {filename}",
+                    message=f'Generating suggested questions for "{filename}"',
                 )
             suggested_questions = generate_suggested_questions(
                 chunks, notebook_id=notebook_id
@@ -818,7 +818,16 @@ def source_hub_ui(print_debug: bool = False) -> None:
                 base_progress = i / num_files
                 prog_state = {"val": 0.0}
 
-                def update_granular_status(status_message: str):
+                def _update_multi_status(
+                    status_message: str,
+                    status_text: Any = status_text,
+                    files_to_process: List[Tuple[str, Any]] = files_to_process,
+                    i: int = i,
+                    num_files: int = num_files,
+                    prog_state: Dict[str, float] = prog_state,
+                    progress_bar: Any = progress_bar,
+                    base_progress: float = base_progress,
+                ) -> None:
                     file_list_html = ""
                     for j, (fname_iter, _) in enumerate(files_to_process):
                         if j < i:
@@ -837,19 +846,30 @@ def source_hub_ui(print_debug: bool = False) -> None:
                     )
 
                     max_val_for_file = 0.95 / num_files
-                    remaining = max_val_for_file - prog_state["val"]
-                    prog_state["val"] += remaining * 0.1
 
-                    current_val = min(base_progress + prog_state["val"], 1.0)
+                    match: Optional[re.Match[str]] = re.search(
+                        CHUNKS_PROGRESS_REGEX, status_message
+                    )
+                    if match:
+                        current_chunk = float(match.group(1))
+                        total_chunks = float(match.group(2))
+                        prog_state["val"] = max_val_for_file * (
+                            0.1 + (current_chunk / total_chunks) * 0.8
+                        )
+                    else:
+                        remaining: float = max_val_for_file - prog_state["val"]
+                        prog_state["val"] += remaining * 0.05
+
+                    current_val: float = min(base_progress + prog_state["val"], 1.0)
                     progress_bar.progress(current_val)
 
-                update_granular_status("Initializing...")
+                _update_multi_status("Initializing...")
 
                 process_file(
                     fbytes,
                     fname,
                     cfg.PRINT_DEBUG,
-                    progress_callback=update_granular_status,
+                    progress_callback=_update_multi_status,
                 )
 
                 progress_bar.progress(min((i + 1) / num_files, 1.0))
@@ -910,22 +930,37 @@ def source_hub_ui(print_debug: bool = False) -> None:
 
                 prog_state = {"val": 0.0}
 
-                def update_granular_status(status_message: str):
+                def _update_single_status(
+                    status_message: str,
+                    status_text: Any = status_text,
+                    filename: str = filename,
+                    prog_state: Dict[str, float] = prog_state,
+                    progress_bar: Any = progress_bar,
+                ) -> None:
                     status_text.markdown(
                         f"<div class='progress-status-text'><b>Processing:</b> {filename} <br> ↳ <i>{status_message}</i></div>",
                         unsafe_allow_html=True,
                     )
-                    remaining = 0.95 - prog_state["val"]
-                    prog_state["val"] += remaining * 0.1
-                    progress_bar.progress(prog_state["val"])
 
-                update_granular_status("Initializing...")
+                    match: Optional[re.Match[str]] = re.search(
+                        CHUNKS_PROGRESS_REGEX, status_message
+                    )
+                    if match:
+                        current_chunk = float(match.group(1))
+                        total_chunks = float(match.group(2))
+                        prog_state["val"] = 0.95 * (
+                            0.1 + (current_chunk / total_chunks) * 0.8
+                        )
+                    else:
+                        remaining: float = 0.95 - prog_state["val"]
+                        prog_state["val"] += remaining * 0.05
+                    progress_bar.progress(prog_state["val"])
 
                 process_file(
                     file_bytes_new,
                     filename,
                     cfg.PRINT_DEBUG,
-                    progress_callback=update_granular_status,
+                    progress_callback=_update_single_status,
                 )
 
                 progress_bar.progress(1.0)
@@ -983,16 +1018,31 @@ def source_hub_ui(print_debug: bool = False) -> None:
 
                 prog_state = {"val": 0.0}
 
-                def update_granular_status(status_message: str):
+                def _update_replace_status(
+                    status_message: str,
+                    status_text: Any = status_text,
+                    filename: str = filename,
+                    prog_state: Dict[str, float] = prog_state,
+                    progress_bar: Any = progress_bar,
+                ) -> None:
                     status_text.markdown(
                         f"<div class='progress-status-text'><b>Replacing:</b> {filename} <br> ↳ <i>{status_message}</i></div>",
                         unsafe_allow_html=True,
                     )
-                    remaining = 0.95 - prog_state["val"]
-                    prog_state["val"] += remaining * 0.1
-                    progress_bar.progress(prog_state["val"])
 
-                update_granular_status("Removing old version...")
+                    match: Optional[re.Match[str]] = re.search(
+                        CHUNKS_PROGRESS_REGEX, status_message
+                    )
+                    if match:
+                        current_chunk = float(match.group(1))
+                        total_chunks = float(match.group(2))
+                        prog_state["val"] = 0.95 * (
+                            0.1 + (current_chunk / total_chunks) * 0.8
+                        )
+                    else:
+                        remaining = 0.95 - prog_state["val"]
+                        prog_state["val"] += remaining * 0.05
+                    progress_bar.progress(prog_state["val"])
 
                 # Phase 1: Remove old version
                 if source_id in st.session_state.documents:
@@ -1021,7 +1071,7 @@ def source_hub_ui(print_debug: bool = False) -> None:
                     file_bytes,
                     filename,
                     True,
-                    progress_callback=update_granular_status,
+                    progress_callback=_update_replace_status,
                 )
 
                 progress_bar.progress(1.0)
@@ -1356,6 +1406,32 @@ def chat_interface(notebook_name: str, print_debug: bool = False) -> None:
                                 unsafe_allow_html=True,
                             )
 
+                # Check for historical trace
+                if message.get("reasoning_trace"):
+                    with st.expander("🧠 Self-RAG Reasoning Trace", expanded=False):
+                        st.markdown("**Multi-Hop Retrieval Execution:**")
+                        for i, step in enumerate(message["reasoning_trace"], 1):
+                            step_text = str(step).strip()
+                            if step_text:
+                                st.markdown(f"**Step {i}:** {step_text}")
+
+                        metrics = message.get("confidence_metrics")
+                        if metrics:
+                            st.markdown("---")
+                            st.markdown("**Confidence Scores:**")
+                            st.markdown(
+                                f"- **Total Score:** {metrics.get('total_score', 0.0):.2f}"
+                            )
+                            st.markdown(
+                                f"- Groundedness (ISSUP): {metrics.get('issup', 0.0):.2f}"
+                            )
+                            st.markdown(
+                                f"- Relevance (ISREL): {metrics.get('isrel', 0.0):.2f}"
+                            )
+                            st.markdown(
+                                f"- Utility (ISUSE): {metrics.get('isuse', 0.0):.2f}"
+                            )
+
     # DETECT INTERRUPTED GENERATIONS: If the last message in history is from a User without an Assistant response
     needs_answer = False
     query_to_answer = ""
@@ -1451,13 +1527,23 @@ def chat_interface(notebook_name: str, print_debug: bool = False) -> None:
                         # Exclude the current query from the chat history passed for context!
                         history_context = st.session_state.chat_history[:-1]
 
-                        answer, sources, found_answer = process_user_query(
+                        (
+                            answer,
+                            sources,
+                            found_answer,
+                            reasoning_trace,
+                            confidence_score,
+                        ) = process_user_query(
                             query_to_answer,
                             st.session_state.rag_chain,
                             st.session_state.vectorstore,
                             chat_history=history_context,
                             print_debug=print_debug,
+                            notebook_id=st.session_state.current_notebook_id,
                         )
+
+                        # Store reasoning trace in session state for optional UI transparency display
+                        st.session_state.last_reasoning_trace = reasoning_trace
 
                         # Display answer
                         st.markdown(answer)
@@ -1469,6 +1555,8 @@ def chat_interface(notebook_name: str, print_debug: bool = False) -> None:
                             content=answer,
                             sources=sources,
                             found_answer=found_answer,
+                            confidence_score=confidence_score,
+                            reasoning_trace=reasoning_trace,
                         )
                         st.session_state.chat_history.append(
                             {
@@ -1476,6 +1564,12 @@ def chat_interface(notebook_name: str, print_debug: bool = False) -> None:
                                 "content": answer,
                                 "sources": sources,
                                 "found_answer": found_answer,
+                                "reasoning_trace": st.session_state.last_reasoning_trace,
+                                "confidence_metrics": st.session_state.self_rag_metadata.get(
+                                    "confidence_metrics"
+                                )
+                                if "self_rag_metadata" in st.session_state
+                                else None,
                             }
                         )
 
@@ -1492,6 +1586,13 @@ def chat_interface(notebook_name: str, print_debug: bool = False) -> None:
                                         """,
                                         unsafe_allow_html=True,
                                     )
+
+                        # We now render the trace entirely from the chat_history loop above
+                        # Clear old transient session states if exist
+                        if "last_reasoning_trace" in st.session_state:
+                            st.session_state.last_reasoning_trace = []
+                        if "self_rag_metadata" in st.session_state:
+                            st.session_state.self_rag_metadata = {}
 
                     except Exception as e:
                         error_msg = str(e)
@@ -1779,11 +1880,11 @@ def render_notebook_settings_sidebar(notebook_id: str) -> None:
         new_temp = st.slider(
             "Temperature",
             key=f"temp{k_suf}",
-            min_value=cfg.LLM_TEMPERATURE_MIN,
-            max_value=cfg.LLM_TEMPERATURE_MAX,
-            step=cfg.LLM_TEMPERATURE_STEP,
-            value=float(settings["llm_temp"]),
-            help=cfg.LLM_TEMPERATURE_HELP_MSG,
+            min_value=cfg.LLM_AVG_TEMP_MIN,
+            max_value=cfg.LLM_AVG_TEMP_MAX,
+            step=cfg.LLM_AVG_TEMP_STEP,
+            value=float(settings["llm_avg_temp"]),
+            help=cfg.LLM_AVG_TEMP_HELP_MSG,
         )
 
         new_num_ctx = st.number_input(
@@ -1903,6 +2004,74 @@ def render_notebook_settings_sidebar(notebook_id: str) -> None:
             help=cfg.RAG_MAX_CTX_LEN_HELP_MSG,
         )
 
+        st.markdown("### Self-RAG Configuration")
+        st.markdown("**Multi-hop retrieval with quality-based repair**")
+
+        new_self_rag_max_depth = st.number_input(
+            "Max Retrieval Depth",
+            key=f"srag_depth{k_suf}",
+            min_value=cfg.SELF_RAG_MAX_DEPTH_MIN,
+            max_value=cfg.SELF_RAG_MAX_DEPTH_MAX,
+            step=cfg.SELF_RAG_MAX_DEPTH_STEP,
+            value=int(settings.get("self_rag_max_depth", cfg.SELF_RAG_MAX_DEPTH)),
+            help=cfg.SELF_RAG_MAX_DEPTH_HELP_MSG,
+        )
+
+        new_self_rag_candidates = st.number_input(
+            "Candidate Answers per Hop",
+            key=f"srag_cand{k_suf}",
+            min_value=cfg.SELF_RAG_CANDIDATES_MIN,
+            max_value=cfg.SELF_RAG_CANDIDATES_MAX,
+            step=cfg.SELF_RAG_CANDIDATES_STEP,
+            value=int(settings.get("self_rag_candidates", cfg.SELF_RAG_CANDIDATES)),
+            help=cfg.SELF_RAG_CANDIDATES_HELP_MSG,
+        )
+
+        new_self_rag_max_retries = st.number_input(
+            "Retries per Query (Surgical Retry)",
+            key=f"srag_retry{k_suf}",
+            min_value=cfg.SELF_RAG_MAX_RETRIES_PER_HOP_MIN,
+            max_value=cfg.SELF_RAG_MAX_RETRIES_PER_HOP_MAX,
+            step=cfg.SELF_RAG_MAX_RETRIES_PER_HOP_STEP,
+            value=int(
+                settings.get(
+                    "self_rag_max_retries_per_hop", cfg.SELF_RAG_MAX_RETRIES_PER_HOP
+                )
+            ),
+            help=cfg.SELF_RAG_MAX_RETRIES_PER_HOP_HELP_MSG,
+        )
+
+        st.markdown("**Quality Gates (0.0-1.0)**")
+        new_self_rag_threshold_issup = st.slider(
+            "Groundedness (ISSUP)",
+            key=f"srag_issup{k_suf}",
+            min_value=cfg.SELF_RAG_THRESHOLD_ISSUP_MIN,
+            max_value=cfg.SELF_RAG_THRESHOLD_ISSUP_MAX,
+            step=cfg.SELF_RAG_THRESHOLD_ISSUP_STEP,
+            value=float(settings.get("self_rag_threshold_issup", 0.70)),
+            help=cfg.SELF_RAG_THRESHOLD_ISSUP_HELP_MSG,
+        )
+
+        new_self_rag_threshold_isrel = st.slider(
+            "Relevance (ISREL)",
+            key=f"srag_isrel{k_suf}",
+            min_value=cfg.SELF_RAG_THRESHOLD_ISREL_MIN,
+            max_value=cfg.SELF_RAG_THRESHOLD_ISREL_MAX,
+            step=cfg.SELF_RAG_THRESHOLD_ISREL_STEP,
+            value=float(settings.get("self_rag_threshold_isrel", 0.70)),
+            help=cfg.SELF_RAG_THRESHOLD_ISREL_HELP_MSG,
+        )
+
+        new_self_rag_threshold_isuse = st.slider(
+            "Utility (ISUSE)",
+            key=f"srag_isuse{k_suf}",
+            min_value=cfg.SELF_RAG_THRESHOLD_ISUSE_MIN,
+            max_value=cfg.SELF_RAG_THRESHOLD_ISUSE_MAX,
+            step=cfg.SELF_RAG_THRESHOLD_ISUSE_STEP,
+            value=float(settings.get("self_rag_threshold_isuse", 0.70)),
+            help=cfg.SELF_RAG_THRESHOLD_ISUSE_HELP_MSG,
+        )
+
         is_safe = True
         is_forbidden = False  # For configurations that are logically invalid and cannot be applied at all
 
@@ -2019,7 +2188,7 @@ def render_notebook_settings_sidebar(notebook_id: str) -> None:
 
         updated_settings: Dict[str, Any] = {
             "llm_model_name": str(new_model),
-            "llm_temp": float(new_temp),
+            "llm_avg_temp": float(new_temp),
             "llm_num_ctx": int(new_num_ctx),
             "rag_final_context_k": int(new_k),
             "rag_rerank_top_n": int(new_rerank_n),
@@ -2034,6 +2203,12 @@ def render_notebook_settings_sidebar(notebook_id: str) -> None:
             ),
             "weight_semantic": float(new_weight_semantic),
             "weight_bm25": 1.0 - float(new_weight_semantic),
+            "self_rag_max_depth": int(new_self_rag_max_depth),
+            "self_rag_candidates": int(new_self_rag_candidates),
+            "self_rag_max_retries_per_hop": int(new_self_rag_max_retries),
+            "self_rag_threshold_issup": float(new_self_rag_threshold_issup),
+            "self_rag_threshold_isrel": float(new_self_rag_threshold_isrel),
+            "self_rag_threshold_isuse": float(new_self_rag_threshold_isuse),
         }
 
         # Check if settings actually changed
@@ -2481,7 +2656,7 @@ if __name__ == "__main__":
             debug_log(
                 "INFO",
                 "🗄️",
-                f"Database file not found at {cfg.DB_ROOT_PATH}. Initializing new database.",
+                f'Database file not found at "{cfg.DB_ROOT_PATH}". Initializing new database.',
             )
 
         init_db(cfg.DB_ROOT_PATH, cfg.PRINT_DEBUG)

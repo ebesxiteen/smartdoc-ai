@@ -172,6 +172,8 @@ def add_chat_message(
     content: str,
     sources: Optional[List[Dict[str, Any]]] = None,
     found_answer: Optional[bool] = None,
+    confidence_score: Optional[float] = None,
+    reasoning_trace: Optional[List[str]] = None,
 ) -> str:
     if role not in [cfg.USER_ROLE_NAME, cfg.ASSISTANT_ROLE_NAME]:
         raise ValueError(
@@ -181,7 +183,15 @@ def add_chat_message(
     if not clean_spaces(content):
         raise ValueError("Content cannot be empty.")
 
-    return crud.add_chat_message(notebook_id, role, content, sources, found_answer)
+    return crud.add_chat_message(
+        notebook_id,
+        role,
+        content,
+        sources,
+        found_answer,
+        confidence_score,
+        reasoning_trace,
+    )
 
 
 def get_chat_history(notebook_id: str) -> List[Dict[str, Any]]:
@@ -234,7 +244,10 @@ def upsert_notebook_settings(notebook_id: str, settings: Dict[str, Any]) -> None
     # 1. Define the validation schema
     # Format: "key": (min_val, max_val)
     validation_map: Dict[str, tuple[int | float, int | float]] = {
-        "rag_final_context_k": (cfg.RAG_FINAL_CONTEXT_K_MIN, cfg.RAG_FINAL_CONTEXT_K_MAX),
+        "rag_final_context_k": (
+            cfg.RAG_FINAL_CONTEXT_K_MIN,
+            cfg.RAG_FINAL_CONTEXT_K_MAX,
+        ),
         "rag_rerank_top_n": (cfg.RAG_RERANK_TOP_N_MIN, cfg.RAG_RERANK_TOP_N_MAX),
         "rag_retrieval_min_results": (
             cfg.RAG_RETRIEVAL_MIN_RESULTS_MIN,
@@ -249,8 +262,29 @@ def upsert_notebook_settings(notebook_id: str, settings: Dict[str, Any]) -> None
         "rag_max_ctx_len": (cfg.RAG_MAX_CTX_LEN_MIN, cfg.RAG_MAX_CTX_LEN_MAX),
         "max_msg_history": (cfg.MAX_MSG_HISTORY_MIN, cfg.MAX_MSG_HISTORY_MAX),
         "llm_num_ctx": (cfg.LLM_NUM_CTX_MIN, cfg.LLM_NUM_CTX_MAX),
-        "llm_temp": (cfg.LLM_TEMPERATURE_MIN, cfg.LLM_TEMPERATURE_MAX),
+        "avg_llm_temp": (cfg.LLM_AVG_TEMP_MIN, cfg.LLM_AVG_TEMP_MAX),
         "weight_semantic": (cfg.WEIGHT_SEMANTIC_MIN, cfg.WEIGHT_SEMANTIC_MAX),
+        "self_rag_max_depth": (cfg.SELF_RAG_MAX_DEPTH_MIN, cfg.SELF_RAG_MAX_DEPTH_MAX),
+        "self_rag_candidates": (
+            cfg.SELF_RAG_CANDIDATES_MIN,
+            cfg.SELF_RAG_CANDIDATES_MAX,
+        ),
+        "self_rag_max_retries_per_hop": (
+            cfg.SELF_RAG_MAX_RETRIES_PER_HOP_MIN,
+            cfg.SELF_RAG_MAX_RETRIES_PER_HOP_MAX,
+        ),
+        "self_rag_threshold_issup": (
+            cfg.SELF_RAG_THRESHOLD_ISSUP_MIN,
+            cfg.SELF_RAG_THRESHOLD_ISSUP_MAX,
+        ),
+        "self_rag_threshold_isrel": (
+            cfg.SELF_RAG_THRESHOLD_ISREL_MIN,
+            cfg.SELF_RAG_THRESHOLD_ISREL_MAX,
+        ),
+        "self_rag_threshold_isuse": (
+            cfg.SELF_RAG_THRESHOLD_ISUSE_MIN,
+            cfg.SELF_RAG_THRESHOLD_ISUSE_MAX,
+        ),
     }
 
     # 2. Iterate and Validate
@@ -263,6 +297,23 @@ def upsert_notebook_settings(notebook_id: str, settings: Dict[str, Any]) -> None
                 raise ValueError(
                     f"Invalid {key}: {value}. Must be between {min_val} and {max_val}."
                 )
+
+    # 2b. Cross-parameter constraint: Initial Retrieval Pool must cover Final Context size
+    # (rag_rerank_top_n is the wide funnel; rag_final_context_k is how many reach the LLM)
+    rerank_top_n = settings.get("rag_rerank_top_n")
+    final_context_k = settings.get("rag_final_context_k")
+    if (
+        rerank_top_n is not None
+        and final_context_k is not None
+        and isinstance(rerank_top_n, (int, float))
+        and isinstance(final_context_k, (int, float))
+        and rerank_top_n < final_context_k
+    ):
+        raise ValueError(
+            f"Invalid configuration: Initial Retrieval Pool (rag_rerank_top_n={rerank_top_n}) "
+            f"must be >= Final LLM Context (rag_final_context_k={final_context_k}). "
+            f"The retrieval pool is the input to the re-ranking funnel — it must be at least as large as the desired output."
+        )
 
     # 3. Save to Database
     try:
