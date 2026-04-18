@@ -141,9 +141,11 @@ def get_default_notebook_settings() -> Dict[str, Any]:
         "self_rag_threshold_issup": cfg.SELF_RAG_THRESHOLD_ISSUP,
         "self_rag_threshold_isrel": cfg.SELF_RAG_THRESHOLD_ISREL,
         "self_rag_threshold_isuse": cfg.SELF_RAG_THRESHOLD_ISUSE,
+        "co_rag_max_retries": cfg.CO_RAG_MAX_RETRIES,
     }
 
 
+@st.cache_data(show_spinner=False)
 def load_notebook_settings(
     notebook_id: Optional[str],
 ) -> Dict[str, Any]:
@@ -228,6 +230,9 @@ def load_notebook_settings(
         "self_rag_threshold_isuse": settings.get("self_rag_threshold_isuse")
         if settings.get("self_rag_threshold_isuse") is not None
         else defaults["self_rag_threshold_isuse"],
+        "co_rag_max_retries": settings.get("co_rag_max_retries")
+        if settings.get("co_rag_max_retries") is not None
+        else defaults["co_rag_max_retries"],
     }
 
 
@@ -1081,7 +1086,10 @@ def process_user_query(
                 min_results=int(settings["rag_retrieval_min_results"]),
                 score_threshold=float(settings["rag_retrieval_score_threshold"]),
                 print_debug=print_debug,
-                settings=settings,
+                weight_semantic=float(
+                    settings.get("weight_semantic", cfg.WEIGHT_SEMANTIC)
+                ),
+                weight_bm25=float(settings.get("weight_bm25", cfg.WEIGHT_BM25)),
             )
 
             # Format sources for display
@@ -1157,7 +1165,7 @@ def save_query_and_answer_to_history(
         notebook_id=notebook_id,
         role=cfg.ASSISTANT_ROLE_NAME,
         content=answer,
-        sources=sources,
+        self_rag_sources=sources,
     )
 
 
@@ -1291,7 +1299,8 @@ def rerank_with_cross_encoder(
                 f"Cross-Encoder reranking failed ({str(rerank_err)[:100]}). "
                 "Evicting cached model and falling back to similarity score order.",
             )
-        # Remove the broken/OOM model from session state so it is reloaded fresh later
+        # Remove the broken/OOM model from both caches so it is reloaded fresh on next call
+        try_load_cross_encoder.clear()  # evict from @st.cache_resource
         if "cross_encoder_model" in st.session_state:
             del st.session_state.cross_encoder_model
         # Sort by existing FAISS L2 similarity scores (lower = closer = better)
@@ -1360,7 +1369,8 @@ def retrieve_quality_chunks(
     min_results: int = cfg.RAG_RETRIEVAL_MIN_RESULTS,
     score_threshold: float = cfg.RAG_RETRIEVAL_SCORE_THRESHOLD,
     print_debug: bool = False,
-    settings: Optional[Dict[str, Any]] = None,
+    weight_semantic: float = cfg.WEIGHT_SEMANTIC,
+    weight_bm25: float = cfg.WEIGHT_BM25,
 ) -> List[Document]:
     """
     Retrieve document chunks with quality-based filtering and fallback guarantees.
@@ -1386,10 +1396,6 @@ def retrieve_quality_chunks(
         L2 distance metric used by FAISS: lower distance = higher similarity.
         Values typically range 4.0-6.0 for moderate semantic relevance.
     """
-    settings = settings or {}
-    weight_semantic = float(settings.get("weight_semantic", cfg.WEIGHT_SEMANTIC))
-    weight_bm25 = float(settings.get("weight_bm25", cfg.WEIGHT_BM25))
-
     SEARCH_MODE_BM25 = "BM25 Keyword Search"
 
     # Evaluate Gatekeeper Hybrid Configuration
@@ -1594,7 +1600,6 @@ def retrieve_quality_chunks(
         debug_log(
             "INFO", "✅", f"Final retrieved chunks for display: {len(filtered_results)}"
         )
-        print_breaker()
 
     return filtered_results
 
@@ -1873,6 +1878,37 @@ def format_chat_history_for_rephrase(
             messages.append(AIMessage(content=msg["content"]))
 
     return messages
+
+
+def format_co_rag_chat_history(
+    chat_history: List[Dict[str, Any]], max_messages: int = cfg.MAX_MSG_HISTORY
+) -> List[Dict[str, Any]]:
+    """
+    Build a Co-RAG-isolated view of the chat history.
+
+    For assistant messages, uses ``co_rag_content`` so Co-RAG's LLM sees only
+    Co-RAG's prior answers — not Self-RAG's — keeping the two pipelines fully
+    independent. Falls back to ``content`` for backward-compatibility with
+    messages that predate the dual-pipeline schema.
+
+    Args:
+        chat_history: Raw chat history list from DB / session state.
+        max_messages: Trim to the latest N messages to avoid context overflow.
+
+    Returns:
+        List of message dicts with ``role`` and ``content`` keys suitable for
+        passing into LangChain-style history formatters.
+    """
+    result: List[Dict[str, Any]] = []
+    for msg in chat_history[-max_messages:]:
+        role = msg.get("role", "")
+        if role == cfg.USER_ROLE_NAME:
+            result.append({"role": role, "content": msg.get("content", "")})
+        elif role == cfg.ASSISTANT_ROLE_NAME:
+            # Prefer Co-RAG's own answer; fall back to generic content for old messages
+            co_content = msg.get("co_rag_content") or msg.get("content", "")
+            result.append({"role": role, "content": co_content})
+    return result
 
 
 def get_installed_ollama_models() -> List[str]:

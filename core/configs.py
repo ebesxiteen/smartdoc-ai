@@ -220,12 +220,13 @@ EXAMPLES:
 
 SUMMARY_PROMPT: str = """You are a highly capable document analyst.
 
-TASK: Analyze the provided document text and write a brief 2-3 sentence overview of its main topics.
+TASK: Analyze the provided document text and write a concise 3-5 sentence overview of its main topics.
 
 RULES:
-1. **Be Concise**: Limit your answer to exactly 2-3 sentences.
+1. **Be Concise**: Limit your answer to 3-5 sentences. Longer documents with multiple major themes warrant more sentences.
 2. **Language Matching**: You MUST write the summary in the EXACT SAME LANGUAGE as the provided text (e.g., if the text is in Vietnamese, write in Vietnamese).
 3. **No Fluff**: DO NOT include introductory conversational phrases (e.g., "Here is a summary", "This document is about"). Just output the summary directly.
+4. **Key Terms**: Include the document's key technical, domain-specific, or subject-matter terms so the reader immediately understands the field.
 
 <document_text>
 {text}
@@ -242,6 +243,7 @@ RULES:
 2. **Accuracy**: Questions MUST be directly answerable using only the provided text.
 3. **Language Matching**: You MUST write the questions in the EXACT SAME LANGUAGE as the provided text.
 4. **No Fluff**: DO NOT include conversational filler, introductory text, or concluding remarks. Output ONLY the 3 numbered questions.
+5. **Question Variety**: Vary the question types — include at least one factual recall question (who/what/when/where), one conceptual understanding question (why/how does it work), and one applied or analytical question (compare, evaluate, or apply a concept).
 
 <document_text>
 {text}
@@ -521,11 +523,10 @@ def get_self_rag_system_prompt(
     It is purely document-grounded and does NOT include general knowledge routing or
     greeting detection—Self-RAG handles those at earlier stages.
 
-    CRITICAL: Status tags [STATUS: DOC_ANSWER/DOC_MISSING/GENERAL] are ADDED later during
-    Step 4 (quality scoring/evaluation), NOT in the generation prompt. This separation ensures:
-    - LLM generates clean answers without tag duplication
-    - Quality judges can score each candidate independently
-    - Prevents [STATUS:X][STATUS:X] tag repetition in final output
+    The generator LLM is asked to include `[FOUND: YES]` or `[FOUND: NO]` at the very
+    end of its answer. This tag is captured in generate_candidate_answers() to determine
+    found_answer — whether citations should be shown to the user — independently of the
+    quality gate scores (ISSUP/ISREL/ISUSE) that drive the repair logic.
 
     Args:
         personal_ctx: Personal context about the user (e.g., expertise level, role)
@@ -552,19 +553,23 @@ Current Time: {current_time}{personal_context_block}
 YOUR TASK:
 Answer the user's question based on the retrieved documents. Write as if you are a subject-matter expert explaining something to a curious person — not writing a formal report.
 
-CRITICAL RULES:
+SHARED QUALITY STANDARDS (also enforced by Co-RAG pipeline):
+{SHARED_RAG_STYLE_RULES}
+
+ADDITIONAL RULES:
 1. **Ground in Context First**: Base every claim on the retrieved documents. Inline citations like "(Page 46)" are fine where helpful.
 2. **Acknowledge Gaps Honestly**: If the context doesn't fully cover the question, say so briefly and naturally (e.g., "The documents don't go into detail on X, but based on what's available...").
 3. **Use Chat History When Relevant**: If the question references prior conversation, use the CHAT HISTORY to resolve the reference.
-4. **Language Match**: Write in the EXACT same language as the user's question. Do NOT translate.
-5. **Preserve Technical Terms**: Do NOT translate domain keywords (e.g., RAG, LLM, API, FAISS).
-6. **No Status Tags**: Do NOT include [STATUS:...] tags.
+4. **Found Status**: At the very end of your answer, on its own line, include EXACTLY ONE of:
+   - `[FOUND: YES]` — if your answer is primarily grounded in the retrieved documents
+   - `[FOUND: NO]` — if the documents don't contain enough information and you relied on general knowledge
 
 STRICT FORMAT RULES (violations will cause this answer to be discarded):
 - Do NOT start with "Answer:", "**Answer:**", or any heading.
 - Do NOT add a "Source Citations:", "References:", or "Additional Note:" section at the end.
 - Do NOT add meta-commentary about the chat history (e.g., "The user mentioned their name is X").
-- Write as flowing prose or a natural bulleted list — not a structured report."""
+- Write as flowing prose or a natural bulleted list — not a structured report.
+- The `[FOUND: YES/NO]` tag must be the very last line of your response."""
 
     return prompt
 
@@ -698,6 +703,115 @@ SELF_RAG_THRESHOLD_ISUSE_MIN: float = 0.0
 SELF_RAG_THRESHOLD_ISUSE_MAX: float = 1.0
 SELF_RAG_THRESHOLD_ISUSE_STEP: float = 0.05
 SELF_RAG_THRESHOLD_ISUSE_HELP_MSG: str = "Utility threshold: minimum confidence that the answer is useful and addresses the user's intent. Lower = lenient, Higher = strict."
+
+# ============================================================================
+# SHARED RAG STYLE RULES — injected into both Self-RAG and Co-RAG prompts
+# to enforce a unified "brand voice" across both pipelines.
+# ============================================================================
+SHARED_RAG_STYLE_RULES: str = """\
+- Language Matching: Always respond in the EXACT same language as the user's query. Do NOT translate.
+- No Structural Headers: Do NOT use "Answer:", "Source Citations:", "Additional Note:", or meta-commentary about the context. Write conversationally and directly.
+- Grounding: Every factual claim must be supported by the provided context. Do not hallucinate or invent information beyond the documents.
+- Conciseness: Avoid filler phrases, padding, or restating the question.
+- Technical Terms: Preserve domain-specific vocabulary exactly as-is (e.g., RAG, LLM, API, FAISS). Do not translate them.
+- Completeness: Cover all aspects of the query that the provided context supports. Do not stop before all relevant information from the context has been conveyed.
+- Uncertainty: When the context is incomplete or ambiguous, be explicit about the gap (e.g., "The document does not cover...") rather than extrapolating beyond what is stated."""
+
+# ============================================================================
+# CO-RAG CONFIGURATIONS - Collaborative Generator ↔ Reviewer loop
+# ============================================================================
+# Maximum Generator ↔ Reviewer turns before accepting the current draft (0 = no review)
+CO_RAG_MAX_RETRIES: int = 3
+
+CO_RAG_MAX_RETRIES_MIN: int = 0
+CO_RAG_MAX_RETRIES_MAX: int = 5
+CO_RAG_MAX_RETRIES_STEP: int = 1
+CO_RAG_MAX_RETRIES_HELP_MSG: str = (
+    "Maximum Generator ↔ Reviewer collaboration turns. "
+    "0 = single-pass generation with no review. Higher = more refined but slower."
+)
+
+# ============================================================================
+# CO-RAG PROMPTS
+# ============================================================================
+
+# Generator (Mode A) — initial holistic answer grounded in the retrieved context
+CO_RAG_GENERATOR_INITIAL_PROMPT: str = f"""You are the Lead Researcher. Using ONLY the provided document context, write a comprehensive answer to the user's query.
+
+{{personal_ctx_section}}SHARED QUALITY STANDARDS:
+{SHARED_RAG_STYLE_RULES}
+
+ADDITIONAL RULES:
+1. **Grounding**: Base every claim exclusively on the provided context. If context does not contain the answer, explicitly say so — do NOT invent information.
+2. **Completeness**: Cover all aspects of the query that the context supports. Synthesize across multiple context passages if needed.
+3. **Found Status**: At the very end of your answer, on its own line, include EXACTLY ONE of:
+   - `[FOUND: YES]` — if your answer is primarily grounded in the retrieved documents
+   - `[FOUND: NO]` — if the documents don't contain enough information to answer
+   The `[FOUND: YES/NO]` tag must be the very last line of your response.
+
+{{chat_history_section}}CONTEXT:
+{{context}}
+
+USER QUERY: {{query}}
+
+ANSWER:"""
+
+# Generator (Mode B) — targeted refinement based on Reviewer critique
+CO_RAG_GENERATOR_REFINE_PROMPT: str = f"""You are the Lead Researcher in Editor Mode. Apply the Reviewer's critique as targeted redlines to your previous draft.
+
+{{personal_ctx_section}}SHARED QUALITY STANDARDS:
+{SHARED_RAG_STYLE_RULES}
+
+ADDITIONAL RULES:
+1. **Targeted Edits Only**: Fix ONLY the specific issues listed in the critique. Do NOT rewrite sections that the Reviewer marked as correct.
+2. **Preserve Correct Content**: Keep all parts of the previous draft that the Reviewer did not flag as problematic.
+3. **Grounding**: All added or changed content MUST be supported by the provided context. Do not introduce new claims beyond what the context contains.
+4. **All Prior Issues**: Cross-check ALL turns in the critique history, not just the most recent. Ensure every previously flagged issue is resolved in this revision.
+5. **Found Status**: At the very end of your revised answer, on its own line, include EXACTLY ONE of:
+   - `[FOUND: YES]` — if your answer is primarily grounded in the retrieved documents
+   - `[FOUND: NO]` — if the documents don't contain enough information to answer
+   The `[FOUND: YES/NO]` tag must be the very last line of your response.
+
+{{chat_history_section}}CONTEXT:
+{{context}}
+
+USER QUERY: {{query}}
+
+PREVIOUS DRAFT:
+{{draft}}
+
+REVIEWER CRITIQUE:
+{{critique}}
+
+REVISED ANSWER:"""
+
+# Reviewer — gap-analysis critique with critique history awareness
+CO_RAG_REVIEWER_PROMPT: str = """You are the Critical Reviewer in a collaborative research loop. Evaluate the draft answer against the source context and prior critique history.
+
+YOUR TASK:
+1. Identify specific gaps, hallucinations, contradictions, or omissions in the draft relative to the provided context.
+2. If prior critiques exist, check whether the Generator addressed them — note what was fixed and what remains.
+3. End your response with EXACTLY ONE status tag on its own line.
+
+STATUS TAG DEFINITIONS:
+- [STATUS: VERIFIED] — Draft is accurate, well-grounded, and fully addresses the query. No further revision needed.
+- [STATUS: PARTIAL_VERIFIED] — Draft is substantially correct but has 1-3 specific, clearly fixable gaps or inaccuracies. List each issue with the exact fix required. Do NOT use PARTIAL_VERIFIED for minor stylistic preferences or negligible omissions.
+- [STATUS: CRITICAL_ERROR] — Draft contains factual errors, hallucinations, or major omissions that significantly undermine the answer. Detailed critique required.
+
+NOTE: If this is turn 2 or later, focus on NEW issues — explicitly acknowledge what the Generator has already fixed rather than repeating prior feedback.
+
+CONTEXT:
+{context}
+
+USER QUERY: {query}
+
+DRAFT TO REVIEW:
+{draft}
+
+PRIOR CRITIQUE HISTORY (previous turns, oldest first):
+{critique_history}
+
+CRITIQUE:"""
 
 # ============================================================================
 # DEBUG LOGGING CONFIGURATIONS

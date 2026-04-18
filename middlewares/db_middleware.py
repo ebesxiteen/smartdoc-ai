@@ -170,10 +170,15 @@ def add_chat_message(
     notebook_id: str,
     role: str,
     content: str,
-    sources: Optional[List[Dict[str, Any]]] = None,
-    found_answer: Optional[bool] = None,
-    confidence_score: Optional[float] = None,
-    reasoning_trace: Optional[List[str]] = None,
+    self_rag_content: Optional[str] = None,
+    self_rag_sources: Optional[List[Dict[str, Any]]] = None,
+    self_rag_found_answer: Optional[bool] = None,
+    self_rag_confidence_score: Optional[float] = None,
+    self_rag_reasoning_trace: Optional[List[str]] = None,
+    co_rag_content: Optional[str] = None,
+    co_rag_sources: Optional[List[Dict[str, Any]]] = None,
+    co_rag_found_answer: Optional[bool] = None,
+    co_rag_reasoning_trace: Optional[List[Any]] = None,
 ) -> str:
     if role not in [cfg.USER_ROLE_NAME, cfg.ASSISTANT_ROLE_NAME]:
         raise ValueError(
@@ -187,10 +192,15 @@ def add_chat_message(
         notebook_id,
         role,
         content,
-        sources,
-        found_answer,
-        confidence_score,
-        reasoning_trace,
+        self_rag_content,
+        self_rag_sources,
+        self_rag_found_answer,
+        self_rag_confidence_score,
+        self_rag_reasoning_trace,
+        co_rag_content,
+        co_rag_sources,
+        co_rag_found_answer,
+        co_rag_reasoning_trace,
     )
 
 
@@ -285,6 +295,7 @@ def upsert_notebook_settings(notebook_id: str, settings: Dict[str, Any]) -> None
             cfg.SELF_RAG_THRESHOLD_ISUSE_MIN,
             cfg.SELF_RAG_THRESHOLD_ISUSE_MAX,
         ),
+        "co_rag_max_retries": (cfg.CO_RAG_MAX_RETRIES_MIN, cfg.CO_RAG_MAX_RETRIES_MAX),
     }
 
     # 2. Iterate and Validate

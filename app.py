@@ -12,7 +12,7 @@ import streamlit as st
 import os
 import logging
 import uuid
-from typing import List, Dict, Any, Optional, Callable, Tuple
+from typing import List, Dict, Any, Optional, Callable, Tuple, cast
 from pathlib import Path
 
 from middlewares import db_middleware
@@ -27,6 +27,7 @@ from core.utils import (
     check_file_already_exists_in_notebook,
     reload_vectorstore_and_chain,
     get_source_vectorstore_dir,
+    load_notebook_settings,
 )
 from core.self_rag import create_history_aware_rag_chain
 
@@ -51,6 +52,7 @@ DATA_DIR = Path("data")
 
 DATA_DIR.mkdir(exist_ok=True)
 CHUNKS_PROGRESS_REGEX = r"chunks \d+ to (\d+) of (\d+)"
+_VIEW_SOURCES_LABEL = "✨ View sources"
 
 # ============================================================================
 # PAGE CONFIGURATION
@@ -1391,46 +1393,129 @@ def chat_interface(notebook_name: str, print_debug: bool = False) -> None:
                 render_user_message(message["content"])
             else:
                 # Assistant message
-                st.markdown(message["content"])
+                has_co_rag = bool(message.get("co_rag_content"))
+                if has_co_rag:
+                    tab_srag, tab_corag = st.tabs(
+                        ["⚡ Self-RAG (Vertical)", "⭐ Co-RAG (Horizontal)"]
+                    )
+                    with tab_srag:
+                        st.markdown(
+                            message.get("self_rag_content") or message["content"]
+                        )
+                        if message.get("self_rag_sources") and message.get(
+                            "self_rag_found_answer", True
+                        ):
+                            with st.expander(_VIEW_SOURCES_LABEL, expanded=False):
+                                for j, source in enumerate(message["self_rag_sources"]):
+                                    st.markdown(
+                                        f"""<div class='source-citation'><strong>{j + 1}. {source["document"]} — Page {source["page"]}</strong><br><small>{source["content"]}</small></div>""",
+                                        unsafe_allow_html=True,
+                                    )
+                        if message.get("self_rag_reasoning_trace"):
+                            with st.expander(
+                                "💭 Self-RAG Reasoning Trace", expanded=False
+                            ):
+                                st.markdown("**Multi-Hop Retrieval Execution:**")
+                                for i, step in enumerate(
+                                    message["self_rag_reasoning_trace"], 1
+                                ):
+                                    step_text = str(step).strip()
+                                    if step_text:
+                                        st.markdown(f"**Step {i}:** {step_text}")
+                                metrics = message.get("confidence_metrics")
+                                if metrics:
+                                    st.markdown("---")
+                                    st.markdown("**Confidence Scores:**")
+                                    st.markdown(
+                                        f"- **Total Score:** {metrics.get('total_score', 0.0):.2f}"
+                                    )
+                                    st.markdown(
+                                        f"- Groundedness (ISSUP): {metrics.get('issup', 0.0):.2f}"
+                                    )
+                                    st.markdown(
+                                        f"- Relevance (ISREL): {metrics.get('isrel', 0.0):.2f}"
+                                    )
+                                    st.markdown(
+                                        f"- Utility (ISUSE): {metrics.get('isuse', 0.0):.2f}"
+                                    )
+                    with tab_corag:
+                        st.markdown(message["co_rag_content"])
+                        if message.get("co_rag_sources") and message.get(
+                            "co_rag_found_answer", True
+                        ):
+                            with st.expander(_VIEW_SOURCES_LABEL, expanded=False):
+                                for j, source in enumerate(message["co_rag_sources"]):
+                                    st.markdown(
+                                        f"""<div class='source-citation'><strong>{j + 1}. {source["document"]} — Page {source["page"]}</strong><br><small>{source["content"]}</small></div>""",
+                                        unsafe_allow_html=True,
+                                    )
+                        if message.get("co_rag_reasoning_trace"):
+                            with st.expander("⭐ Co-RAG Review Trace", expanded=False):
+                                st.markdown("**Generator↔Reviewer Collaboration:**")
+                                for i, step in enumerate(
+                                    message["co_rag_reasoning_trace"], 1
+                                ):
+                                    if isinstance(step, dict):
+                                        step_typed = cast(Dict[str, str], step)
+                                        step_label = (
+                                            step_typed.get("step") or f"Step {i}"
+                                        )
+                                        step_action = (
+                                            step_typed.get("action") or ""
+                                        ).strip()
+                                        if step_action:
+                                            st.markdown(
+                                                f"**{step_label}:** {step_action}"
+                                            )
+                                    else:
+                                        step_text = str(step).strip()
+                                        if step_text:
+                                            st.markdown(f"**Turn {i}:** {step_text}")
+                else:
+                    st.markdown(message["content"])
 
-                if message.get("sources") and message.get("found_answer", True):
-                    with st.expander("✨ View sources", expanded=False):
-                        for j, source in enumerate(message["sources"]):
-                            st.markdown(
-                                f"""
-                                    <div class='source-citation'>
-                                    <strong>{j + 1}. {source["document"]} — Page {source["page"]}</strong><br>
-                                    <small>{source["content"]}</small>
-                                    </div>
-                                    """,
-                                unsafe_allow_html=True,
-                            )
+                    if message.get("self_rag_sources") and message.get(
+                        "self_rag_found_answer", True
+                    ):
+                        with st.expander(_VIEW_SOURCES_LABEL, expanded=False):
+                            for j, source in enumerate(message["self_rag_sources"]):
+                                st.markdown(
+                                    f"""
+                                        <div class='source-citation'>
+                                        <strong>{j + 1}. {source["document"]} — Page {source["page"]}</strong><br>
+                                        <small>{source["content"]}</small>
+                                        </div>
+                                        """,
+                                    unsafe_allow_html=True,
+                                )
 
-                # Check for historical trace
-                if message.get("reasoning_trace"):
-                    with st.expander("🧠 Self-RAG Reasoning Trace", expanded=False):
-                        st.markdown("**Multi-Hop Retrieval Execution:**")
-                        for i, step in enumerate(message["reasoning_trace"], 1):
-                            step_text = str(step).strip()
-                            if step_text:
-                                st.markdown(f"**Step {i}:** {step_text}")
+                    # Check for historical trace
+                    if message.get("self_rag_reasoning_trace"):
+                        with st.expander("💭 Self-RAG Reasoning Trace", expanded=False):
+                            st.markdown("**Multi-Hop Retrieval Execution:**")
+                            for i, step in enumerate(
+                                message["self_rag_reasoning_trace"], 1
+                            ):
+                                step_text = str(step).strip()
+                                if step_text:
+                                    st.markdown(f"**Step {i}:** {step_text}")
 
-                        metrics = message.get("confidence_metrics")
-                        if metrics:
-                            st.markdown("---")
-                            st.markdown("**Confidence Scores:**")
-                            st.markdown(
-                                f"- **Total Score:** {metrics.get('total_score', 0.0):.2f}"
-                            )
-                            st.markdown(
-                                f"- Groundedness (ISSUP): {metrics.get('issup', 0.0):.2f}"
-                            )
-                            st.markdown(
-                                f"- Relevance (ISREL): {metrics.get('isrel', 0.0):.2f}"
-                            )
-                            st.markdown(
-                                f"- Utility (ISUSE): {metrics.get('isuse', 0.0):.2f}"
-                            )
+                            metrics = message.get("confidence_metrics")
+                            if metrics:
+                                st.markdown("---")
+                                st.markdown("**Confidence Scores:**")
+                                st.markdown(
+                                    f"- **Total Score:** {metrics.get('total_score', 0.0):.2f}"
+                                )
+                                st.markdown(
+                                    f"- Groundedness (ISSUP): {metrics.get('issup', 0.0):.2f}"
+                                )
+                                st.markdown(
+                                    f"- Relevance (ISREL): {metrics.get('isrel', 0.0):.2f}"
+                                )
+                                st.markdown(
+                                    f"- Utility (ISUSE): {metrics.get('isuse', 0.0):.2f}"
+                                )
 
     # DETECT INTERRUPTED GENERATIONS: If the last message in history is from a User without an Assistant response
     needs_answer = False
@@ -1478,20 +1563,22 @@ def chat_interface(notebook_name: str, print_debug: bool = False) -> None:
                 notebook_id=st.session_state.current_notebook_id,
                 role=cfg.ASSISTANT_ROLE_NAME,
                 content=error_msg,
-                sources=None,
-                found_answer=False,
+                self_rag_content=error_msg,
+                self_rag_sources=None,
+                self_rag_found_answer=False,
             )
             st.session_state.chat_history.append(
                 {
                     "role": cfg.ASSISTANT_ROLE_NAME,
                     "content": error_msg,
-                    "sources": None,
-                    "found_answer": False,
+                    "self_rag_content": error_msg,
+                    "self_rag_sources": None,
+                    "self_rag_found_answer": False,
                 }
             )
             st.rerun()
         else:
-            from core.utils import process_user_query
+            from core.rag import run_dual_rag
 
             with chat_container:
                 with st.spinner("🤔 Thinking..."):
@@ -1527,65 +1614,119 @@ def chat_interface(notebook_name: str, print_debug: bool = False) -> None:
                         # Exclude the current query from the chat history passed for context!
                         history_context = st.session_state.chat_history[:-1]
 
-                        (
-                            answer,
-                            sources,
-                            found_answer,
-                            reasoning_trace,
-                            confidence_score,
-                        ) = process_user_query(
+                        # Build Self-RAG-isolated history (assistant turns use self_rag_content)
+                        self_rag_history = [
+                            {
+                                "role": m["role"],
+                                "content": (
+                                    (m.get("self_rag_content") or m.get("content", ""))
+                                    if m["role"] == cfg.ASSISTANT_ROLE_NAME
+                                    else m.get("content", "")
+                                ),
+                            }
+                            for m in history_context
+                        ]
+
+                        # Build Co-RAG-isolated history (assistant turns use co_rag_content)
+                        co_rag_history = [
+                            {
+                                "role": m["role"],
+                                "content": (
+                                    (m.get("co_rag_content") or m.get("content", ""))
+                                    if m["role"] == cfg.ASSISTANT_ROLE_NAME
+                                    else m.get("content", "")
+                                ),
+                            }
+                            for m in history_context
+                        ]
+
+                        result = run_dual_rag(
                             query_to_answer,
                             st.session_state.rag_chain,
                             st.session_state.vectorstore,
-                            chat_history=history_context,
-                            print_debug=print_debug,
-                            notebook_id=st.session_state.current_notebook_id,
+                            self_rag_history,
+                            print_debug,
+                            st.session_state.current_notebook_id,
+                            co_rag_chat_history=co_rag_history,
                         )
+
+                        answer = result["self_rag_content"]
+                        sources = result["self_rag_sources"]
+                        found_answer = result["self_rag_found_answer"]
+                        reasoning_trace = result["self_rag_reasoning_trace"]
+                        confidence_score = result["self_rag_confidence_score"]
+                        co_rag_content = result["co_rag_content"]
+                        co_rag_sources = result["co_rag_sources"]
+                        co_rag_found_answer = result["co_rag_found_answer"]
+                        co_rag_reasoning_trace = result["co_rag_reasoning_trace"]
 
                         # Store reasoning trace in session state for optional UI transparency display
                         st.session_state.last_reasoning_trace = reasoning_trace
 
-                        # Display answer
-                        st.markdown(answer)
+                        # Display answer with dual-pipeline tabs
+                        tab_srag, tab_corag = st.tabs(
+                            ["⚡ Self-RAG (Vertical)", "⭐ Co-RAG (Horizontal)"]
+                        )
+                        with tab_srag:
+                            st.markdown(answer)
+                            if sources and found_answer:
+                                with st.expander(_VIEW_SOURCES_LABEL, expanded=False):
+                                    for j, source in enumerate(sources):
+                                        st.markdown(
+                                            f"""<div class='source-citation'><strong>{j + 1}. {source["document"]} — Page {source["page"]}</strong><br><small>{source["content"]}</small></div>""",
+                                            unsafe_allow_html=True,
+                                        )
+                        with tab_corag:
+                            if co_rag_content:
+                                st.markdown(co_rag_content)
+                                if co_rag_sources and co_rag_found_answer:
+                                    with st.expander(
+                                        _VIEW_SOURCES_LABEL, expanded=False
+                                    ):
+                                        for j, source in enumerate(co_rag_sources):
+                                            st.markdown(
+                                                f"""<div class='source-citation'><strong>{j + 1}. {source["document"]} — Page {source["page"]}</strong><br><small>{source["content"]}</small></div>""",
+                                                unsafe_allow_html=True,
+                                            )
+                            else:
+                                st.markdown(
+                                    "*(Co-RAG not available for this message.)*"
+                                )
 
-                        # Add to history with found_answer flag
+                        # Add to history with self_rag_found_answer flag
                         db_middleware.add_chat_message(
                             notebook_id=st.session_state.current_notebook_id,
                             role=cfg.ASSISTANT_ROLE_NAME,
                             content=answer,
-                            sources=sources,
-                            found_answer=found_answer,
-                            confidence_score=confidence_score,
-                            reasoning_trace=reasoning_trace,
+                            self_rag_content=answer,
+                            self_rag_sources=sources,
+                            self_rag_found_answer=found_answer,
+                            self_rag_confidence_score=confidence_score,
+                            self_rag_reasoning_trace=reasoning_trace,
+                            co_rag_content=co_rag_content,
+                            co_rag_sources=co_rag_sources,
+                            co_rag_found_answer=co_rag_found_answer,
+                            co_rag_reasoning_trace=co_rag_reasoning_trace,
                         )
                         st.session_state.chat_history.append(
                             {
                                 "role": cfg.ASSISTANT_ROLE_NAME,
                                 "content": answer,
-                                "sources": sources,
-                                "found_answer": found_answer,
-                                "reasoning_trace": st.session_state.last_reasoning_trace,
+                                "self_rag_content": answer,
+                                "self_rag_sources": sources,
+                                "self_rag_found_answer": found_answer,
+                                "self_rag_reasoning_trace": st.session_state.last_reasoning_trace,
                                 "confidence_metrics": st.session_state.self_rag_metadata.get(
                                     "confidence_metrics"
                                 )
                                 if "self_rag_metadata" in st.session_state
                                 else None,
+                                "co_rag_content": co_rag_content,
+                                "co_rag_sources": co_rag_sources,
+                                "co_rag_found_answer": co_rag_found_answer,
+                                "co_rag_reasoning_trace": co_rag_reasoning_trace,
                             }
                         )
-
-                        # Display sources (only if LLM found relevant context)
-                        if sources and found_answer:
-                            with st.expander("✨ View sources", expanded=False):
-                                for j, source in enumerate(sources):
-                                    st.markdown(
-                                        f"""
-                                        <div class='source-citation'>
-                                        <strong>{j + 1}. {source["document"]} — Page {source["page"]}</strong><br>
-                                        <small>{source["content"]}</small>
-                                        </div>
-                                        """,
-                                        unsafe_allow_html=True,
-                                    )
 
                         # We now render the trace entirely from the chat_history loop above
                         # Clear old transient session states if exist
@@ -1622,15 +1763,17 @@ def chat_interface(notebook_name: str, print_debug: bool = False) -> None:
                             notebook_id=st.session_state.current_notebook_id,
                             role=cfg.ASSISTANT_ROLE_NAME,
                             content=display_error,
-                            sources=None,
-                            found_answer=False,
+                            self_rag_content=display_error,
+                            self_rag_sources=None,
+                            self_rag_found_answer=False,
                         )
                         st.session_state.chat_history.append(
                             {
                                 "role": cfg.ASSISTANT_ROLE_NAME,
                                 "content": display_error,
-                                "sources": None,
-                                "found_answer": False,
+                                "self_rag_content": display_error,
+                                "self_rag_sources": None,
+                                "self_rag_found_answer": False,
                             }
                         )
 
@@ -1809,6 +1952,350 @@ def create_notebook_modal() -> None:
                 st.rerun()
             except ValueError as e:
                 st.error(f"❌ {str(e)}")
+
+
+def _compute_settings_warnings(
+    snap: Dict[str, Any],
+    hw_info: Dict[str, Any],
+) -> Tuple[List[Tuple[str, str]], bool]:
+    """
+    Compute all validation messages for the notebook settings UI.
+
+    Evaluates hardware compatibility, logical consistency, performance impact,
+    and RAG quality trade-offs across both Self-RAG and Co-RAG pipelines.
+
+    Args:
+        snap: Flat dict containing all current setting values:
+              model, temp, num_ctx, personal_ctx, rerank_n, k, threshold,
+              history, chunk_len, chunk_ovl, min_res, max_ctx,
+              self_rag_max_depth, self_rag_candidates, self_rag_max_retries,
+              self_rag_threshold_issup, self_rag_threshold_isrel,
+              self_rag_threshold_isuse, co_rag_max_retries.
+        hw_info: Hardware info dict from get_system_hardware_info().
+
+    Returns:
+        Tuple of:
+            issues: List of (level, message) where level is "error" | "warning" | "info".
+            is_forbidden: True when at least one issue is a logical impossibility
+                          that must be resolved before settings can be applied.
+    """
+    issues: List[Tuple[str, str]] = []
+    is_forbidden = False
+
+    # Unpack settings snapshot with explicit casts for type safety
+    model: str = str(snap.get("model", ""))
+    temp: float = float(snap.get("temp", 0.7))
+    num_ctx: int = int(snap.get("num_ctx", 4096))
+    personal_ctx: str = str(snap.get("personal_ctx", ""))
+    rerank_n: int = int(snap.get("rerank_n", 10))
+    k: int = int(snap.get("k", 8))
+    threshold: float = float(snap.get("threshold", 15.0))
+    history: int = int(snap.get("history", 10))
+    chunk_len: int = int(snap.get("chunk_len", 1000))
+    chunk_ovl: int = int(snap.get("chunk_ovl", 100))
+    min_res: int = int(snap.get("min_res", 1))
+    max_ctx: int = int(snap.get("max_ctx", 8000))
+    self_rag_max_depth: int = int(snap.get("self_rag_max_depth", 2))
+    self_rag_candidates: int = int(snap.get("self_rag_candidates", 3))
+    self_rag_max_retries: int = int(snap.get("self_rag_max_retries", 2))
+    self_rag_threshold_issup: float = float(snap.get("self_rag_threshold_issup", 0.7))
+    self_rag_threshold_isrel: float = float(snap.get("self_rag_threshold_isrel", 0.7))
+    self_rag_threshold_isuse: float = float(snap.get("self_rag_threshold_isuse", 0.7))
+    co_rag_max_retries: int = int(snap.get("co_rag_max_retries", 3))
+
+    vram: float = float(hw_info.get("vram_gb") or 0.0)
+    ram: float = float(hw_info.get("ram_gb") or 0.0)
+    model_lower = model.lower()
+
+    # ------------------------------------------------------------------ #
+    # A. Hardware & Memory Capacity
+    # ------------------------------------------------------------------ #
+
+    # VRAM guardrails by model family size
+    is_heavy_model = any(tag in model_lower for tag in ("70b", "72b", "32b"))
+    is_medium_model = not is_heavy_model and any(
+        tag in model_lower for tag in ("14b", "13b", "20b")
+    )
+    is_light_model = not is_heavy_model and not is_medium_model
+
+    if is_heavy_model and vram < 24.0:
+        issues.append(
+            (
+                "error",
+                f"⚠️ Hardware Mismatch: Your GPU has {vram:.1f} GB VRAM. Models 32B+ typically "
+                "require >24 GB. Expect severe lag or Out-Of-Memory crashes.",
+            )
+        )
+    elif is_medium_model and vram < 12.0:
+        issues.append(
+            (
+                "warning",
+                f"⚠️ Memory Pressure: Your GPU has {vram:.1f} GB VRAM. Models 14B–20B typically "
+                "require >12 GB. You may experience significant slowdowns or OOM errors.",
+            )
+        )
+    elif is_light_model and 0.0 < vram < 6.0:
+        issues.append(
+            (
+                "warning",
+                f"⚠️ Low VRAM: Your GPU has {vram:.1f} GB VRAM. Models up to 8B benefit from "
+                ">6 GB VRAM. Consider a smaller quantized model for faster inference.",
+            )
+        )
+
+    # High context window on low-RAM hardware
+    if num_ctx > 8192 and (ram < 16.0 or vram < 8.0):
+        issues.append(
+            (
+                "warning",
+                f"⚠️ Memory Warning: A context window of {num_ctx:,} tokens consumes significant "
+                "RAM/VRAM. You may experience crashes on your current hardware.",
+            )
+        )
+
+    # Context bottleneck: estimated text usage vs context window size
+    # Usage = (chunks × chars/chunk) + (history turns × ~250 chars/turn) + system overhead
+    estimated_usage = (k * chunk_len) + (history * 250) + 500
+    if estimated_usage > num_ctx:
+        issues.append(
+            (
+                "warning",
+                "⚠️ Context Bottleneck: Your Retrieval K and Chat History generate more text than "
+                "your Context Window can hold. The AI will 'forget' older document chunks or chat "
+                f"history. Estimated: ~{estimated_usage:,} chars vs window: {num_ctx:,} tokens.",
+            )
+        )
+
+    # ------------------------------------------------------------------ #
+    # B. Logical Consistency — Forbidden States (block Apply)
+    # ------------------------------------------------------------------ #
+
+    # Retrieval funnel: cannot select more than retrieved
+    if k > rerank_n:
+        issues.append(
+            (
+                "error",
+                f"❌ Logic Error: Final Context K ({k}) cannot exceed the Initial Retrieval Pool "
+                f"({rerank_n}). The system cannot select more chunks than it initially retrieved "
+                "for re-ranking.",
+            )
+        )
+        is_forbidden = True
+
+    # Chunking infinity loop
+    if chunk_ovl >= chunk_len:
+        issues.append(
+            (
+                "error",
+                f"❌ Chunking Error: Chunk Overlap ({chunk_ovl}) must be strictly less than "
+                f"Chunk Length ({chunk_len}). This setting would cause an infinite document-"
+                "processing loop.",
+            )
+        )
+        is_forbidden = True
+
+    # Fallback conflict
+    if min_res > k:
+        issues.append(
+            (
+                "error",
+                f"❌ Fallback Conflict: Minimum required results ({min_res}) cannot be higher than "
+                f"Final Context K ({k}). The fallback cannot guarantee more results than K allows.",
+            )
+        )
+        is_forbidden = True
+
+    # Self-RAG threshold floor — any gate at zero disables the scoring logic
+    # Use < 0.01 instead of == 0.0 to avoid float equality check (slider step is 0.05)
+    gates_at_zero = [
+        name
+        for name, val in (
+            ("ISSUP", self_rag_threshold_issup),
+            ("ISREL", self_rag_threshold_isrel),
+            ("ISUSE", self_rag_threshold_isuse),
+        )
+        if val < 0.01
+    ]
+    if gates_at_zero:
+        gate_list = ", ".join(gates_at_zero)
+        issues.append(
+            (
+                "error",
+                f"❌ Invalid Threshold: Setting {gate_list} to 0.0 disables the Self-RAG repair "
+                "logic for that gate entirely. Use at least 0.1 to keep quality gates active.",
+            )
+        )
+        is_forbidden = True
+
+    # ------------------------------------------------------------------ #
+    # C. Retrieval & RAG Quality Warnings
+    # ------------------------------------------------------------------ #
+
+    if threshold < 10.0:
+        issues.append(
+            (
+                "warning",
+                f"⚠️ High Strictness: A Score Threshold of {threshold:.1f} is very strict. "
+                "The AI may frequently say 'I cannot find the answer' even when related text "
+                "exists in your documents.",
+            )
+        )
+    elif threshold > 15.0:
+        issues.append(
+            (
+                "warning",
+                f"⚠️ Low Strictness: A Score Threshold of {threshold:.1f} is very loose. "
+                "The AI may retrieve irrelevant noise and produce hallucinated answers.",
+            )
+        )
+
+    # High rerank pool on CPU-only hardware
+    if rerank_n > 40 and vram < 0.1:
+        issues.append(
+            (
+                "warning",
+                "⚠️ High Retrieval Pool Without GPU: Cross-Encoder Re-ranking over a large "
+                "candidate pool will heavily impact Time to First Token on CPU-only hardware. "
+                "Decrease Top-N for faster responses.",
+            )
+        )
+
+    # Chunk length overflows RAG max context
+    if chunk_len > max_ctx:
+        issues.append(
+            (
+                "warning",
+                f"⚠️ Embedding Truncation: Max Chunk Length ({chunk_len:,}) exceeds RAG Max "
+                f"Context Length ({max_ctx:,}). The tail of each document chunk will be "
+                "truncated and lost during embedding.",
+            )
+        )
+
+    # ------------------------------------------------------------------ #
+    # D. Self-RAG Performance & Quality
+    # ------------------------------------------------------------------ #
+
+    # High Complexity: depth × candidates = total LLM calls per query
+    llm_calls = self_rag_max_depth * self_rag_candidates
+    if llm_calls > 6:
+        issues.append(
+            (
+                "warning",
+                f"⚠️ Complex Search: Search depth ({self_rag_max_depth}) × candidates "
+                f"({self_rag_candidates}) = {llm_calls} LLM calls per query. "
+                "Expect significant latency.",
+            )
+        )
+
+    # Perfectionist Trap: deep search + extremely strict gates → likely never passes
+    if self_rag_max_depth > 3 and (
+        self_rag_threshold_issup > 0.8 or self_rag_threshold_isrel > 0.8
+    ):
+        issues.append(
+            (
+                "warning",
+                "⚠️ Perfectionist Trap: High search depth combined with extremely strict quality "
+                "gates (ISSUP or ISREL > 0.8) may lead to frequent 'Answer Not Found' results "
+                "or excessive repair loops.",
+            )
+        )
+
+    # Redundant Retries: many retries with very lenient gates → first result always accepted
+    if (
+        self_rag_max_retries > 2
+        and self_rag_threshold_issup < 0.4
+        and self_rag_threshold_isrel < 0.4
+    ):
+        issues.append(
+            (
+                "info",
+                "💡 Redundant Retries: High retries per hop combined with very low quality "
+                "thresholds — the system will likely accept the first low-quality result, "
+                "making extra retries a waste of compute.",
+            )
+        )
+
+    # High branching: each extra candidate adds a full LLM generation
+    if self_rag_candidates > 3:
+        issues.append(
+            (
+                "warning",
+                f"⚡ High Branching: Generating {self_rag_candidates} candidate answers per hop "
+                "will spike CPU/GPU usage during the Self-RAG candidate generation phase.",
+            )
+        )
+
+    # Loose Evidence gate: low ISSUP means weak grounding is accepted
+    if 0.01 < self_rag_threshold_issup < 0.5:
+        issues.append(
+            (
+                "info",
+                f"📊 Loose Evidence Gate: ISSUP threshold of {self_rag_threshold_issup:.2f} allows "
+                "answers with weak document support. Recommended ≥ 0.7 for research-grade accuracy.",
+            )
+        )
+
+    # ------------------------------------------------------------------ #
+    # E. Dual-Pipeline Parallel Fatigue
+    # ------------------------------------------------------------------ #
+
+    if self_rag_max_depth > 3 and co_rag_max_retries > 3:
+        issues.append(
+            (
+                "warning",
+                f"🐢 Dual-Pipeline Latency: Both Recursive Search (Self-RAG depth="
+                f"{self_rag_max_depth}) and Peer-Review (Co-RAG turns={co_rag_max_retries}) "
+                "are set to high-intensity mode. Total response time will be exceptionally slow.",
+            )
+        )
+
+    # ------------------------------------------------------------------ #
+    # F. LLM Behavior
+    # ------------------------------------------------------------------ #
+
+    if temp > 0.8:
+        issues.append(
+            (
+                "info",
+                f"💡 High Creativity: Temperature {temp:.2f} increases linguistic variety but may "
+                "cause the Co-RAG Reviewer to miss factual inconsistencies and produce less "
+                "grounded answers.",
+            )
+        )
+    elif temp > 0.7:
+        issues.append(
+            (
+                "info",
+                f"💡 Elevated Temperature: Temperature {temp:.2f} makes the AI more creative but "
+                "slightly increases the risk of hallucinating facts outside the document context.",
+            )
+        )
+
+    if len(personal_ctx) > 1000:
+        issues.append(
+            (
+                "info",
+                "💡 Long Personal Context: Your persona instructions are quite long. They are safely "
+                "injected into the system prompt but consume part of your available Context Window.",
+            )
+        )
+
+    # ------------------------------------------------------------------ #
+    # G. Document Chunking Quality
+    # ------------------------------------------------------------------ #
+
+    # High overlap redundancy (only when not already a forbidden-state overlap)
+    if chunk_len > 0 and chunk_ovl < chunk_len and chunk_ovl > chunk_len * 0.5:
+        issues.append(
+            (
+                "info",
+                f"💡 High Overlap Redundancy: Chunk Overlap ({chunk_ovl}) exceeds 50% of Chunk "
+                f"Length ({chunk_len}). This wastes memory by embedding the same text segments "
+                "multiple times during indexing.",
+            )
+        )
+
+    return issues, is_forbidden
 
 
 def render_notebook_settings_sidebar(notebook_id: str) -> None:
@@ -2072,93 +2559,50 @@ def render_notebook_settings_sidebar(notebook_id: str) -> None:
             help=cfg.SELF_RAG_THRESHOLD_ISUSE_HELP_MSG,
         )
 
-        is_safe = True
-        is_forbidden = False  # For configurations that are logically invalid and cannot be applied at all
-
-        # A. Hardware & Memory Capacity Warnings:
-        is_heavy_model = (
-            "70b" in str(new_model).lower() or "32b" in str(new_model).lower()
+        st.markdown("### Co-RAG Configuration")
+        new_co_rag_max_retries = st.number_input(
+            "Max Collaboration Turns",
+            key=f"corag_retry{k_suf}",
+            min_value=cfg.CO_RAG_MAX_RETRIES_MIN,
+            max_value=cfg.CO_RAG_MAX_RETRIES_MAX,
+            step=cfg.CO_RAG_MAX_RETRIES_STEP,
+            value=int(settings.get("co_rag_max_retries", cfg.CO_RAG_MAX_RETRIES)),
+            help=cfg.CO_RAG_MAX_RETRIES_HELP_MSG,
         )
-        if is_heavy_model and hw_info["vram_gb"] < 24.0:
-            st.error(
-                f"⚠️ Hardware Mismatch: Your GPU has {hw_info['vram_gb']}GB VRAM. Models 32B+ typically require >24GB. Expect severe lag or Out-Of-Memory crashes."
-            )
-            is_safe = False
 
-        if new_num_ctx > 8192 and (
-            hw_info["ram_gb"] < 16.0 or hw_info["vram_gb"] < 8.0
-        ):
-            st.warning(
-                f"⚠️ Memory Warning: A context window of {int(new_num_ctx)} consumes significant RAM/VRAM. You may experience crashes on your current hardware."
-            )
-            is_safe = False
-
-        estimated_usage = (int(new_k) * new_chunk_len) + (int(new_history) * 200) + 500
-        if estimated_usage > int(new_num_ctx):
-            st.warning(
-                "⚠️ Context Bottleneck: Your Retrieval K and Chat History generate more text than your Context Window can hold. The AI will 'forget' older document chunks or chat history."
-            )
-            is_safe = False
-
-        # B. Retrieval & RAG Quality Warnings:
-        if new_threshold < 10.0:
-            st.warning(
-                f"⚠️ High Strictness: A threshold of {float(new_threshold):.2f} is very strict. The AI may frequently say 'I cannot find the answer' even if related text exists."
-            )
-            is_safe = False
-        elif new_threshold > 15.0:
-            st.warning(
-                f"⚠️ Low Strictness: A threshold of {float(new_threshold):.2f} is very loose. The AI may retrieve irrelevant noise and hallucinate."
-            )
-            is_safe = False
-
-        if new_min_res > new_k:
-            st.error(
-                f"⚠️ Logic Error: Minimum results ({int(new_min_res)}) cannot be greater than the maximum chunks fetched (Retrieval K: {int(new_k)})."
-            )
-            is_safe = False
-
-        if new_k > new_rerank_n:
-            st.error(
-                f"❌ Final LLM Context ({new_k}) cannot exceed Initial Retrieval Pool ({new_rerank_n}). Please adjust."
-            )
-            is_forbidden = True
-
-        vram = hw_info.get("vram_gb") or 0.0
-        if new_rerank_n > 40 and vram < 0.1:
-            st.warning(
-                "⚠️ High Initial Retrieval Pool without a dedicated GPU. Cross-Encoder Re-ranking will heavily impact 'Time to First Token'. Decrease Top-N for faster responses."
-            )
-            is_safe = False
-
-        # C. Chunking Configuration Warnings:
-        if new_chunk_ovl >= new_chunk_len:
-            st.error(
-                f"⚠️ Chunking Error: Overlap ({int(new_chunk_ovl)}) must be strictly less than the Max Chunk Length ({int(new_chunk_len)}) to prevent infinite loops during PDF processing."
-            )
-            is_safe = False
-
-        if new_chunk_len > new_max_ctx:
-            st.warning(
-                f"⚠️ Embedding Truncation: Max Chunk Length ({int(new_chunk_len)}) exceeds the Embedding Context Limit ({int(new_max_ctx)}). The ends of your document chunks will be truncated and lost during embedding."
-            )
-            is_safe = False
-
-        # D. LLM Behavior Warnings:
-        if new_temp > 0.7:
-            st.info(
-                f"💡 High Creativity: A temperature of {float(new_temp):.1f} makes the AI creative but increases the risk of inventing facts (hallucinations) outside the documents."
-            )
-            is_safe = False
-
-        if len(new_personal_ctx) > 1000:
-            st.info(
-                "💡 Long Context: Your personal context is quite long. This is safely injected into the system prompt, but remember that it consumes part of your available Context Window."
-            )
-            is_safe = False
-
-        # E. Safe States:
-        if is_safe:
+        # --- Settings Validation ---
+        issues, is_forbidden = _compute_settings_warnings(
+            snap={
+                "model": str(new_model),
+                "temp": float(new_temp),
+                "num_ctx": int(new_num_ctx),
+                "personal_ctx": str(new_personal_ctx) if new_personal_ctx else "",
+                "rerank_n": int(new_rerank_n),
+                "k": int(new_k),
+                "threshold": float(new_threshold),
+                "history": int(new_history),
+                "chunk_len": int(new_chunk_len),
+                "chunk_ovl": int(new_chunk_ovl),
+                "min_res": int(new_min_res),
+                "max_ctx": int(new_max_ctx),
+                "self_rag_max_depth": int(new_self_rag_max_depth),
+                "self_rag_candidates": int(new_self_rag_candidates),
+                "self_rag_max_retries": int(new_self_rag_max_retries),
+                "self_rag_threshold_issup": float(new_self_rag_threshold_issup),
+                "self_rag_threshold_isrel": float(new_self_rag_threshold_isrel),
+                "self_rag_threshold_isuse": float(new_self_rag_threshold_isuse),
+                "co_rag_max_retries": int(new_co_rag_max_retries),
+            },
+            hw_info=hw_info,
+        )
+        for level, msg in issues:
+            if level == "error":
+                st.error(msg)
+            elif level == "warning":
+                st.warning(msg)
+            else:
+                st.info(msg)
+        if not issues:
             st.success(
                 "🤗 System configurations are mathematically sound and optimal for your current hardware."
             )
@@ -2209,6 +2653,7 @@ def render_notebook_settings_sidebar(notebook_id: str) -> None:
             "self_rag_threshold_issup": float(new_self_rag_threshold_issup),
             "self_rag_threshold_isrel": float(new_self_rag_threshold_isrel),
             "self_rag_threshold_isuse": float(new_self_rag_threshold_isuse),
+            "co_rag_max_retries": int(new_co_rag_max_retries),
         }
 
         # Check if settings actually changed
@@ -2218,6 +2663,8 @@ def render_notebook_settings_sidebar(notebook_id: str) -> None:
                     db_middleware.upsert_notebook_settings(
                         notebook_id, updated_settings
                     )
+                # Invalidate the cached settings so the next query loads fresh values
+                load_notebook_settings.clear()
                 st.session_state.rag_chain = None
                 break
 

@@ -217,33 +217,59 @@ def add_chat_message(
     notebook_id: str,
     role: str,
     content: str,
-    sources: Optional[List[Dict[str, Any]]] = None,
-    found_answer: Optional[bool] = None,
-    confidence_score: Optional[float] = None,
-    reasoning_trace: Optional[List[str]] = None,
+    self_rag_content: Optional[str] = None,
+    self_rag_sources: Optional[List[Dict[str, Any]]] = None,
+    self_rag_found_answer: Optional[bool] = None,
+    self_rag_confidence_score: Optional[float] = None,
+    self_rag_reasoning_trace: Optional[List[str]] = None,
+    co_rag_content: Optional[str] = None,
+    co_rag_sources: Optional[List[Dict[str, Any]]] = None,
+    co_rag_found_answer: Optional[bool] = None,
+    co_rag_reasoning_trace: Optional[List[Any]] = None,
 ) -> str:
     msg_id = str(uuid.uuid4())
-    sources_str = json.dumps(sources) if sources else None
-    reasoning_trace_str = json.dumps(reasoning_trace) if reasoning_trace else None
+    self_rag_sources_str = json.dumps(self_rag_sources) if self_rag_sources else None
+    self_rag_reasoning_trace_str = (
+        json.dumps(self_rag_reasoning_trace) if self_rag_reasoning_trace else None
+    )
+    co_rag_sources_str = json.dumps(co_rag_sources) if co_rag_sources else None
+    co_rag_reasoning_trace_str = (
+        json.dumps(co_rag_reasoning_trace) if co_rag_reasoning_trace else None
+    )
 
     # Convert bool to int for SQLite (True=1, False=0, None=NULL)
-    if found_answer is None:
-        found_answer_int = None
+    if self_rag_found_answer is None:
+        self_rag_found_answer_int = None
     else:
-        found_answer_int = 1 if found_answer else 0
+        self_rag_found_answer_int = 1 if self_rag_found_answer else 0
+
+    if co_rag_found_answer is None:
+        co_rag_found_answer_int = None
+    else:
+        co_rag_found_answer_int = 1 if co_rag_found_answer else 0
 
     with get_connection() as conn:
         conn.execute(
-            "INSERT INTO chat_messages (id, notebook_id, role, content, sources, found_answer, confidence_score, reasoning_trace) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            """INSERT INTO chat_messages (
+                id, notebook_id, role, content,
+                self_rag_content, self_rag_sources, self_rag_found_answer,
+                self_rag_confidence_score, self_rag_reasoning_trace,
+                co_rag_content, co_rag_sources, co_rag_found_answer, co_rag_reasoning_trace
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 msg_id,
                 notebook_id,
                 role,
                 content,
-                sources_str,
-                found_answer_int,
-                confidence_score,
-                reasoning_trace_str,
+                self_rag_content,
+                self_rag_sources_str,
+                self_rag_found_answer_int,
+                self_rag_confidence_score,
+                self_rag_reasoning_trace_str,
+                co_rag_content,
+                co_rag_sources_str,
+                co_rag_found_answer_int,
+                co_rag_reasoning_trace_str,
             ),
         )
     return msg_id
@@ -259,26 +285,48 @@ def get_chat_history(notebook_id: str) -> List[Dict[str, Any]]:
         history: List[Dict[str, Any]] = []
         for row in rows:
             msg = dict(row)
-            msg["sources"] = json.loads(msg["sources"]) if msg["sources"] else None
-            # Also parse reasoning_trace from JSON
-            if "reasoning_trace" in msg and msg["reasoning_trace"]:
-                msg["reasoning_trace"] = json.loads(msg["reasoning_trace"])
-            else:
-                msg["reasoning_trace"] = None
 
-            # Convert found_answer from int back to bool (1=True, 0=False, None=None)
-            if "found_answer" in msg:
-                msg["found_answer"] = (
-                    None if msg["found_answer"] is None else bool(msg["found_answer"])
+            # Parse Self-RAG columns from JSON
+            msg["self_rag_sources"] = (
+                json.loads(msg["self_rag_sources"])
+                if msg.get("self_rag_sources")
+                else None
+            )
+            msg["self_rag_reasoning_trace"] = (
+                json.loads(msg["self_rag_reasoning_trace"])
+                if msg.get("self_rag_reasoning_trace")
+                else None
+            )
+
+            # Parse Co-RAG columns from JSON
+            msg["co_rag_sources"] = (
+                json.loads(msg["co_rag_sources"]) if msg.get("co_rag_sources") else None
+            )
+            msg["co_rag_reasoning_trace"] = (
+                json.loads(msg["co_rag_reasoning_trace"])
+                if msg.get("co_rag_reasoning_trace")
+                else None
+            )
+
+            # Convert self_rag_found_answer from int back to bool (1=True, 0=False, None=None)
+            if "self_rag_found_answer" in msg:
+                msg["self_rag_found_answer"] = (
+                    None
+                    if msg["self_rag_found_answer"] is None
+                    else bool(msg["self_rag_found_answer"])
                 )
             else:
-                msg["found_answer"] = (
-                    True  # Default for old messages without this field
-                )
+                msg["self_rag_found_answer"] = True  # Default for legacy messages
 
-            # Reconstruct confidence_metrics for the UI
-            if msg.get("confidence_score") is not None:
-                msg["confidence_metrics"] = {"total_score": msg["confidence_score"]}
+            # Convert co_rag_found_answer from int back to bool
+            if msg.get("co_rag_found_answer") is not None:
+                msg["co_rag_found_answer"] = bool(msg["co_rag_found_answer"])
+
+            # Reconstruct confidence_metrics for the UI (from self_rag_confidence_score column)
+            if msg.get("self_rag_confidence_score") is not None:
+                msg["confidence_metrics"] = {
+                    "total_score": msg["self_rag_confidence_score"]
+                }
 
             history.append(msg)
         return history
@@ -384,9 +432,9 @@ def upsert_notebook_settings(notebook_id: str, settings: Dict[str, Any]) -> None
                 llm_model_name, llm_num_ctx, llm_avg_temp, personal_ctx,
                 weight_semantic, weight_bm25, self_rag_max_depth, self_rag_candidates,
                 self_rag_max_retries_per_hop, self_rag_threshold_issup, self_rag_threshold_isrel,
-                self_rag_threshold_isuse, updated_at
+                self_rag_threshold_isuse, co_rag_max_retries, updated_at
             ) VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP
             ) ON CONFLICT(notebook_id) DO UPDATE SET
                 rag_final_context_k=excluded.rag_final_context_k,
                 rag_rerank_top_n=excluded.rag_rerank_top_n,
@@ -408,6 +456,7 @@ def upsert_notebook_settings(notebook_id: str, settings: Dict[str, Any]) -> None
                 self_rag_threshold_issup=excluded.self_rag_threshold_issup,
                 self_rag_threshold_isrel=excluded.self_rag_threshold_isrel,
                 self_rag_threshold_isuse=excluded.self_rag_threshold_isuse,
+                co_rag_max_retries=excluded.co_rag_max_retries,
                 updated_at=CURRENT_TIMESTAMP;
             """,
             (
@@ -423,7 +472,9 @@ def upsert_notebook_settings(notebook_id: str, settings: Dict[str, Any]) -> None
                 settings.get("max_msg_history"),
                 settings.get("llm_model_name"),
                 settings.get("llm_num_ctx"),
-                settings.get("llm_avg_temp"),  # key matches schema column `llm_avg_temp`
+                settings.get(
+                    "llm_avg_temp"
+                ),  # key matches schema column `llm_avg_temp`
                 settings.get("personal_ctx"),
                 settings.get("weight_semantic"),
                 settings.get("weight_bm25"),
@@ -433,6 +484,7 @@ def upsert_notebook_settings(notebook_id: str, settings: Dict[str, Any]) -> None
                 settings.get("self_rag_threshold_issup"),
                 settings.get("self_rag_threshold_isrel"),
                 settings.get("self_rag_threshold_isuse"),
+                settings.get("co_rag_max_retries"),
             ),
         )
         conn.commit()

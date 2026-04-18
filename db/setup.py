@@ -62,10 +62,17 @@ def init_db(db_name: str = cfg.DB_ROOT_PATH, print_debug: bool = False) -> None:
             notebook_id TEXT NOT NULL,
             role VARCHAR(50) CHECK(role IN ('{cfg.USER_ROLE_NAME}', '{cfg.ASSISTANT_ROLE_NAME}')) NOT NULL,
             content TEXT NOT NULL,
-            sources TEXT, -- Stored as JSON string
-            found_answer INTEGER DEFAULT 1, -- 1=True (found), 0=False (not found)
-            confidence_score REAL DEFAULT NULL, -- Self-RAG confidence score (0.0-1.0)
-            reasoning_trace TEXT DEFAULT NULL, -- Self-RAG reasoning trace (JSON array)
+            -- Self-RAG specific columns
+            self_rag_content TEXT DEFAULT NULL, -- Self-RAG answer text
+            self_rag_sources TEXT DEFAULT NULL, -- Self-RAG sources (JSON array)
+            self_rag_found_answer INTEGER DEFAULT 1, -- Self-RAG: 1=True (found), 0=False (not found)
+            self_rag_confidence_score REAL DEFAULT NULL, -- Self-RAG confidence score (0.0-1.0)
+            self_rag_reasoning_trace TEXT DEFAULT NULL, -- Self-RAG reasoning trace (JSON array)
+            -- Co-RAG specific columns (NULL for user messages and pre-Co-RAG assistant messages)
+            co_rag_content TEXT DEFAULT NULL, -- Co-RAG answer text
+            co_rag_sources TEXT DEFAULT NULL, -- Co-RAG sources (JSON array)
+            co_rag_found_answer INTEGER DEFAULT NULL, -- Co-RAG found_answer flag
+            co_rag_reasoning_trace TEXT DEFAULT NULL, -- Co-RAG horizontal trace (JSON array)
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (notebook_id) REFERENCES notebooks (id) ON DELETE CASCADE
         )
@@ -96,6 +103,7 @@ def init_db(db_name: str = cfg.DB_ROOT_PATH, print_debug: bool = False) -> None:
             self_rag_threshold_issup REAL DEFAULT {cfg.SELF_RAG_THRESHOLD_ISSUP},
             self_rag_threshold_isrel REAL DEFAULT {cfg.SELF_RAG_THRESHOLD_ISREL},
             self_rag_threshold_isuse REAL DEFAULT {cfg.SELF_RAG_THRESHOLD_ISUSE},
+            co_rag_max_retries INTEGER DEFAULT {cfg.CO_RAG_MAX_RETRIES},
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (notebook_id) REFERENCES notebooks (id) ON DELETE CASCADE

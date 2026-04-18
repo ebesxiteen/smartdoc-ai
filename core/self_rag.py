@@ -93,11 +93,12 @@ class SelfRAGState:
 # ============================================================================
 
 
-def _reformulate_query_with_history(
+def reformulate_query_with_history(
     query: str,
     chat_history: List[Any],
     notebook_id: Optional[str] = None,
     print_debug: bool = False,
+    settings: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
     Reformulate a follow-up question into a standalone question using chat history.
@@ -113,6 +114,9 @@ def _reformulate_query_with_history(
         chat_history: List of chat messages for context.
         notebook_id: Notebook ID for loading custom settings (LLM model, etc.).
         print_debug: Whether to print debug logs.
+        settings: Pre-loaded notebook settings dict. If provided, skips the DB
+                  lookup, avoiding a redundant round-trip when the caller already
+                  has settings loaded.
 
     Returns:
         str: Reformulated standalone query (or original if reformulation skipped).
@@ -124,7 +128,9 @@ def _reformulate_query_with_history(
         from langchain_core.prompts import ChatPromptTemplate
         from langchain_ollama import OllamaLLM
 
-        settings = load_notebook_settings(notebook_id) if notebook_id else {}
+        settings = settings or (
+            load_notebook_settings(notebook_id) if notebook_id else {}
+        )
         llm = OllamaLLM(
             model=settings.get("llm_model_name", cfg.LLM_MODEL_NAME),
             base_url=cfg.LLM_BASE_URL,
@@ -322,7 +328,7 @@ def initialize_self_rag_state(
     """
     # Reformulate query using chat history for context-aware standalone question
     if chat_history:
-        original_query = _reformulate_query_with_history(
+        original_query = reformulate_query_with_history(
             query, chat_history, notebook_id, print_debug
         )
     else:
@@ -496,7 +502,10 @@ def retrieve_with_surgical_retry(
                         cfg.RAG_RETRIEVAL_SCORE_THRESHOLD,
                     ),
                     print_debug=print_debug,
-                    settings=settings,
+                    weight_semantic=float(
+                        settings.get("weight_semantic", cfg.WEIGHT_SEMANTIC)
+                    ),
+                    weight_bm25=float(settings.get("weight_bm25", cfg.WEIGHT_BM25)),
                 )
 
                 if docs:
@@ -629,7 +638,7 @@ def generate_candidate_answers(
     max_candidates: int = 3,
     print_debug: bool = False,
     progress_callback: Optional[Callable[[str], None]] = None,
-) -> List[str]:
+) -> List[Dict[str, Any]]:
     """
     Step 3: Generate `max_candidates` diverse draft answers from retrieved context.
 
@@ -649,7 +658,9 @@ def generate_candidate_answers(
         progress_callback: Optional callback for progress bar updates.
 
     Returns:
-        List[str]: Generated answer candidates (without status tags).
+        List[Dict[str, Any]]: Generated candidate dicts with keys:
+            - answer (str): Clean answer text (without [FOUND:] tag)
+            - generator_found_answer (bool): True if LLM tagged [FOUND: YES]
     """
     _ = search_plan  # Reserved for future use
 
@@ -674,7 +685,7 @@ def generate_candidate_answers(
             ]
         )
 
-    candidates: List[str] = []
+    candidates: List[Dict[str, Any]] = []
 
     try:
         from langchain_core.prompts import ChatPromptTemplate
@@ -746,17 +757,30 @@ APPROACH: {hint}"""
             )
 
             answer = str(response).strip()
-            # Defensive cleanup: strip status tags if LLM included them early
+
+            # Capture the generator LLM's own [FOUND: YES/NO] tag before stripping it.
+            # This tag is the source of truth for found_answer (whether citations are shown).
+            found_match = re.search(r"\[FOUND:\s*(YES|NO)\]", answer, re.IGNORECASE)
+            generator_found_answer = (
+                found_match.group(1).upper() == "YES" if found_match else False
+            )
+
+            # Strip [FOUND:] tag and any legacy [STATUS:] tags from clean answer
+            answer = re.sub(
+                r"\[FOUND:\s*(?:YES|NO)\]", "", answer, flags=re.IGNORECASE
+            ).strip()
             answer = re.sub(r"\[STATUS:[^\]]*\]", "", answer).strip()
 
-            candidates.append(answer)
+            candidates.append(
+                {"answer": answer, "generator_found_answer": generator_found_answer}
+            )
 
             if print_debug:
                 debug_log(
                     "INFO",
                     "✍️",
                     f"Step 3 Generator | Candidate {i + 1}/{max_candidates} | "
-                    f"Length: {len(answer)} chars | System: Self-RAG",
+                    f"Length: {len(answer)} chars | FOUND: {'YES' if generator_found_answer else 'NO'}",
                 )
 
         return candidates
@@ -1405,7 +1429,7 @@ def self_rag_query(
                 )
 
             # Step 3: Generate candidates
-            candidates = generate_candidate_answers(
+            candidate_dicts: List[Dict[str, Any]] = generate_candidate_answers(
                 state.original_query,
                 sub_queries,
                 retrieved_docs,
@@ -1416,22 +1440,37 @@ def self_rag_query(
                 print_debug,
             )
 
-            if not candidates:
+            if not candidate_dicts:
                 state.reasoning_trace.append("Step 3 Generator produced no candidates")
-                candidates = [
-                    "Unable to generate response. Please rephrase your question."
+                candidate_dicts = [
+                    {
+                        "answer": "Unable to generate response. Please rephrase your question.",
+                        "generator_found_answer": False,
+                    }
                 ]
+
+            # Extract plain text candidates for the scorer
+            candidate_texts = [cd["answer"] for cd in candidate_dicts]
 
             # Step 4: Score candidates
             scored_candidates = score_candidates_with_judges(
                 state.original_query,
-                candidates,
+                candidate_texts,
                 retrieved_docs,
                 llm_chain,
                 print_debug,
                 None,  # progress_callback skipped at orchestrator level
                 notebook_id=notebook_id,
             )
+
+            # Merge generator_found_answer into scored candidates so pick_winner carries it forward
+            for idx, scored in enumerate(scored_candidates):
+                if idx < len(candidate_dicts):
+                    scored["generator_found_answer"] = candidate_dicts[idx][
+                        "generator_found_answer"
+                    ]
+                else:
+                    scored["generator_found_answer"] = False
 
             # Pick winner
             winner = pick_winner(scored_candidates)
@@ -1515,8 +1554,11 @@ def self_rag_query(
 
     final_answer = winner.get("answer", "No answer generated.")
 
-    # Determine if answer is document-grounded
-    found_answer = winner.get("status", "") == "DOC_ANSWER"
+    # Determine if answer is document-grounded using the generator LLM's own assessment.
+    # The generator included [FOUND: YES/NO] in its output; this was captured and stored
+    # as generator_found_answer in each candidate dict, then merged into scored candidates.
+    # Fall back to False if the key is missing (e.g. empty winner fallback).
+    found_answer = bool(winner.get("generator_found_answer", False))
 
     # Format top-5 sources for citation display
     sources = [
@@ -1564,6 +1606,7 @@ def self_rag_query(
         debug_log("INFO", "═" * 70)
 
     status_tag = "[STATUS: DOC_ANSWER]" if found_answer else "[STATUS: DOC_MISSING]"
+
     return (
         f"{status_tag}\n{final_answer}",
         sources,
@@ -1647,12 +1690,21 @@ def create_history_aware_rag_chain(
         if "self_rag_metadata" not in st.session_state:
             st.session_state.self_rag_metadata = {}
 
+        # Detect whether this was a greeting/general-knowledge short-circuit so
+        # run_dual_rag() can skip Co-RAG (no document retrieval needed).
+        is_greeting_query: bool = bool(
+            re.search(r"\[STATUS:\s*GENERAL\]", answer, re.IGNORECASE)
+        )
+
         st.session_state.self_rag_metadata = {
             "reasoning_trace": reasoning_trace,
             "sources": sources,
             "found_answer": found_answer,
             "last_query": question,
             "confidence_metrics": confidence_metrics,
+            # True when Self-RAG short-circuited for a greeting/general query
+            # (for UI display only — Co-RAG runs its own independent intent routing).
+            "is_greeting": is_greeting_query,
         }
 
         if print_debug:
