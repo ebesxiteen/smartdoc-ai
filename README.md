@@ -9,6 +9,8 @@
 - **⚙️ Notebook Settings**: Customize memory, retrieval count, score thresholds, Self-RAG quality gates, and prompts independently per notebook natively via UI.
 - **📚 Document Hub**: Manage PDF and Word documents, track real-time hardware status (RAM/VRAM), and configure intelligent settings with hardware-aware warnings.
 - **🧠 Self-RAG Pipeline**: Multi-hop retrieval with automatic quality scoring (groundedness, relevance, utility) and a repair agent that retries failed searches with a new strategy — delivering significantly more accurate and grounded answers than a single-pass RAG.
+- **🤝 Co-RAG Pipeline**: Collaborative Generator↔Reviewer architecture that iteratively refines answers through peer critique — the Generator drafts a holistic answer, the Reviewer diagnoses gaps and hallucinations, and the loop repeats until the answer is verified or the turn limit is reached.
+- **⚡ Dual-Pipeline Comparison**: Both Self-RAG and Co-RAG run independently on every query, each with its own chat memory and reformulated context. Results are displayed side-by-side in two tabs for direct comparison.
 - **🔍 Hybrid Search**: Intelligently retrieve relevant document sections using combined semantic search (FAISS embeddings) and BM25 full-text search with configurable weighting.
 - **🤖 Grounded AI Responses**: Get answers strictly based on your documents with automatic source citations
 - **🌐 Multi-language Support**: Ask questions in Vietnamese, English, or other languages and receive answers in your preferred language
@@ -141,6 +143,9 @@ SELF_RAG_THRESHOLD_ISSUP: float = 0.70 # Groundedness gate (answer supported by 
 SELF_RAG_THRESHOLD_ISREL: float = 0.70 # Relevance gate (chunks match the query?)
 SELF_RAG_THRESHOLD_ISUSE: float = 0.70 # Utility gate (answer satisfies user intent?)
 
+# Co-RAG Collaboration
+CO_RAG_MAX_RETRIES: int = 3          # Max Generator↔Reviewer turns (0 = no review)
+
 # ...
 ```
 
@@ -151,7 +156,9 @@ smartdoc-ai/
 ├── app.py                    # Main Streamlit entry point
 ├── core/
 │   ├── configs.py           # Centralized configuration parameters
+│   ├── rag.py               # Dual-pipeline orchestrator (run_dual_rag)
 │   ├── self_rag.py          # Self-RAG orchestration pipeline (6-step multi-hop)
+│   ├── co_rag.py            # Co-RAG pipeline (Generator↔Reviewer collaboration)
 │   └── utils.py             # RAG pipeline & utility functions
 ├── db/
 │   ├── setup.py             # Database schema initialization
@@ -212,10 +219,14 @@ smartdoc-ai/
 3. Embed chunks using sentence-transformers
 4. Store embeddings in FAISS; metadata in SQLite
 
-#### Pipeline 2: Query (User Question — Self-RAG)
+#### Pipeline 2: Query (User Question — Dual Pipeline via `run_dual_rag()`)
+
+Every user query runs both pipelines independently and returns a combined result displayed in two tabs.
+
+**Self-RAG (Vertical — multi-hop):**
 
 1. **Intent routing**: Classify query as greeting (skip retrieval) or factual (proceed). Layer 1 uses regex; Layer 2 uses an LLM call for ambiguous inputs.
-2. **Query reformulation**: Rewrite follow-up questions into standalone queries using conversation history context.
+2. **Query reformulation**: Rewrite follow-up questions into standalone queries using Self-RAG's own chat history.
 3. **Search planning**: LLM decomposes the query into 1–3 independent sub-queries covering different aspects.
 4. **Hybrid retrieval + retry**: Run FAISS semantic + BM25 keyword search per sub-query; cross-encoder re-ranks results. Failed sub-queries are rewritten and retried up to `SELF_RAG_MAX_RETRIES_PER_HOP` times.
 5. **Candidate generation**: Generate `SELF_RAG_CANDIDATES` diverse answer drafts at varied temperatures.
@@ -223,6 +234,15 @@ smartdoc-ai/
 7. **Threshold gate**: Accept the best-scoring candidate if all three scores meet configured thresholds.
 8. **Repair & retry**: If no candidate passes, a repair agent diagnoses the failure, generates a new search strategy, and retries the full pipeline — up to `SELF_RAG_MAX_DEPTH` recursive hops.
 9. Stream best answer with source citations; persist confidence score and reasoning trace.
+
+**Co-RAG (Horizontal — iterative peer review):**
+
+1. **Query reformulation**: Rewrite follow-up questions into standalone queries using Co-RAG's own isolated chat history.
+2. **Intent routing**: Same two-layer greeting detection as Self-RAG, using Co-RAG's own history.
+3. **Holistic retrieval**: Single broad FAISS + BM25 pass with cross-encoder re-ranking — no sub-query decomposition.
+4. **Initial generation (Mode A)**: Generator LLM drafts a comprehensive answer grounded in retrieved context.
+5. **Generator↔Reviewer loop**: Reviewer LLM diagnoses gaps, hallucinations, and contradictions; Generator applies targeted fixes (Mode B). Repeats until `[STATUS: VERIFIED]` or `CO_RAG_MAX_RETRIES` turns exhausted.
+6. Stream final verified answer with sources and full critique trace.
 
 ### Why Local-First?
 
@@ -233,9 +253,9 @@ smartdoc-ai/
 
 ## 📊 Project Status
 
-**Version**: 1.0.0 (Initial Release)
-**Completion**: 95.2% (79/83 development tasks completed)
-**Last Updated**: March 25, 2026
+**Version**: 1.2.0 (Dual-Pipeline Release)
+**Completion**: 84.6% (99/117 development tasks completed)
+**Last Updated**: April 18, 2026
 
 ## 📚 Documentation
 

@@ -12,9 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Breaking Changes
 
 - **Self-RAG Replaces Linear RAG Pipeline**: The existing single-pass linear RAG process (`generate_answer()` in `core/utils.py`) has been entirely replaced by a multi-hop Self-RAG orchestration pipeline (`core/self_rag.py`). The query path, prompt structure, and response metadata format have all changed. See the **Self-RAG Pipeline** entry under _Added_ for the full architecture.
+- **Dual-Pipeline Architecture — `run_dual_rag()` Replaces Direct `process_user_query()` Calls**: All query execution in `app.py` now goes through `core/rag.py::run_dual_rag()`, which runs both Self-RAG and Co-RAG fully independently and returns a combined 9-key result dict. Direct calls to `process_user_query()` from `app.py` have been removed.
 - **Database Schema Migration Required**: Existing databases must be deleted and re-initialized via `python db/setup.py`:
-  - `chat_messages` table: Added `confidence_score` (REAL, 0.0–1.0) and `reasoning_trace` (TEXT, JSON array) columns to persist Self-RAG quality scores and decision trace.
-  - `notebook_settings` table: `llm_temp` column renamed to `llm_avg_temp`; six new Self-RAG control columns added: `self_rag_max_depth`, `self_rag_candidates`, `self_rag_max_retries_per_hop`, `self_rag_threshold_issup`, `self_rag_threshold_isrel`, `self_rag_threshold_isuse`.
+  - `chat_messages` table: The old `sources`, `found_answer`, `confidence_score`, and `reasoning_trace` columns have been replaced by pipeline-prefixed columns: `self_rag_content`, `self_rag_sources`, `self_rag_found_answer`, `self_rag_confidence_score`, `self_rag_reasoning_trace`, `co_rag_content`, `co_rag_sources`, `co_rag_found_answer`, `co_rag_reasoning_trace`.
+  - `notebook_settings` table: `llm_temp` column renamed to `llm_avg_temp`; six new Self-RAG control columns added: `self_rag_max_depth`, `self_rag_candidates`, `self_rag_max_retries_per_hop`, `self_rag_threshold_issup`, `self_rag_threshold_isrel`, `self_rag_threshold_isuse`; one new Co-RAG column added: `co_rag_max_retries`.
 - **`LLM_TEMPERATURE` Config Renamed to `LLM_AVG_TEMP`**: The `LLM_TEMPERATURE` constant in `core/configs.py` has been renamed to `LLM_AVG_TEMP` to reflect that Self-RAG derives a spread of sampling temperatures from this base value when generating diverse candidate answers.
 
 ### Added
@@ -38,16 +39,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Self-RAG Notebook Settings**: All six Self-RAG parameters are configurable per-notebook via the existing Notebook Settings UI panel and persisted to the `notebook_settings` table with full input validation in `middlewares/db_middleware.py`.
 - **Self-RAG Confidence & Trace Persistence**: `confidence_score` (composite quality score) and `reasoning_trace` (step-by-step decision log) from each Self-RAG run are stored in `chat_messages` and reconstructed on chat history load for UI display.
 - **Re-ranking with Cross-Encoder**: Implemented the re-ranking of retrieved chunks using a Cross-Encoder model to improve the relevance of retrieved documents for answer generation. This involves many modifications from database schema (adding `rag_final_context_k` and `rag_rerank_top_n`) to the RAG pipeline logic in `app.py` and `core/utils.py`, as well as changes to the UI for configuring these parameters.
+- **Co-RAG Pipeline** (`core/co_rag.py`): New module implementing a fully independent Collaborative RAG pipeline as a 4-step Generator↔Reviewer orchestration engine:
+  - **Step 0a — Query Reformulation**: Rewrites follow-up questions into standalone queries using Co-RAG's own isolated chat history (independent of Self-RAG's reformulated query).
+  - **Step 0b — 2-Layer Intent Routing**: Detects greetings with the same two-layer approach as Self-RAG (regex → LLM fallback) but using Co-RAG's own history, short-circuiting to a Co-RAG greeting response if matched.
+  - **Step 1 — Holistic Single-Shot Retrieval**: Performs one broad retrieval pass using the reformulated query (FAISS semantic + BM25 keyword, then cross-encoder re-ranking), unlike Self-RAG's multi-hop sub-query decomposition.
+  - **Step 2 — Initial Generation (Mode A)**: The Generator LLM produces a comprehensive first-draft answer grounded in the retrieved context.
+  - **Step 3 — Iterative Generator↔Reviewer Loop**: The Reviewer LLM diagnoses gaps, hallucinations, and contradictions in the draft; the Generator applies targeted redlines (Mode B). The loop exits when the Reviewer issues `[STATUS: VERIFIED]` or `co_rag_max_retries` turns are exhausted.
+  - **Step 4 — Return**: Final draft is returned with the full critique history stored as the Co-RAG reasoning trace.
+- **Co-RAG State Tracking** (`CoRAGState` dataclass): Mutable state object tracking current collaboration turn, all reviewer critiques, a verbose `horizontal_trace` of each generation/review step, the reformulated query, retrieved docs, and current draft.
+- **Dual-Pipeline Orchestrator** (`core/rag.py`): New `run_dual_rag()` function as the single app-level entry point. Runs Self-RAG (`process_user_query()`) and Co-RAG (`co_rag_query()`) fully independently in sequence, returning a combined dict with 9 keys: `self_rag_content`, `self_rag_sources`, `self_rag_found_answer`, `self_rag_reasoning_trace`, `self_rag_confidence_score`, `co_rag_content`, `co_rag_sources`, `co_rag_found_answer`, `co_rag_reasoning_trace`.
+- **Dual-Pipeline Chat UI**: Each assistant message is now displayed in two tabs — **⚡ Self-RAG (Vertical)** and **⭐ Co-RAG (Horizontal)** — allowing side-by-side comparison of both pipelines' answers, sources, and reasoning traces for the same query.
+- **Isolated Chat History Per Pipeline**: Co-RAG builds its context from `co_rag_content` turns; Self-RAG from `self_rag_content` turns. Neither pipeline reads the other's history, ensuring fully independent memory and reformulation.
+- **Co-RAG Configuration Parameter** (`core/configs.py`): One new tunable constant with min/max/step/help metadata:
+  - `CO_RAG_MAX_RETRIES` (default: 3) — maximum Generator↔Reviewer collaboration turns before accepting the current draft.
+- **Co-RAG Notebook Settings**: `co_rag_max_retries` is configurable per-notebook via the Notebook Settings UI and persisted to the `notebook_settings` table with full input validation in `middlewares/db_middleware.py`.
+- **Co-RAG Reasoning Trace Persistence**: The `horizontal_trace` (full Generator↔Reviewer step log) from each Co-RAG run is stored in `chat_messages.co_rag_reasoning_trace` and reconstructed on chat history load for UI display.
+- **Shared RAG Style Rules** (`SHARED_RAG_STYLE_RULES` in `core/configs.py`): A unified set of style and grounding rules injected into both Self-RAG and Co-RAG prompts to enforce a consistent brand voice (language matching, no structural headers, grounding, conciseness, technical term preservation) across both pipelines.
+- **Enhanced Settings Warnings for Self-RAG & Co-RAG**: The Notebook Settings validation panel now covers Self-RAG performance warnings (complex search, perfectionist trap, redundant retries, high branching, loose evidence gate), Co-RAG dual-pipeline fatigue warnings, and cross-pipeline latency alerts.
 
 ### Changed
 
 - **`LLM_AVG_TEMP` Replaces `LLM_TEMPERATURE`**: The base LLM temperature constant has been renamed to `LLM_AVG_TEMP` to clarify its role as an average from which Self-RAG derives a spread of temperatures for candidate generation, rather than a single fixed inference temperature.
 
+### Changed
+
+- **`retrieve_quality_chunks` Signature**: Removed the generic `settings: Dict` parameter; the function now accepts explicit `weight_semantic: float` and `weight_bm25: float` keyword arguments. All callers in `core/utils.py`, `core/self_rag.py`, and `core/co_rag.py` have been updated to pass these values explicitly.
+- **`_reformulate_query_with_history` Renamed to `reformulate_query_with_history`**: The leading underscore has been removed to reflect that this function is part of the public API consumed by `core/co_rag.py`.
+
 ### Fixed
 
 - **Debug Log Function Usage**: Corrected the `LOG_CATEGORIES` in `/core/utils.py` and optimized the usage of the `debug_log` function in `app.py` and `core/utils.py` to ensure there's no need to provide emojis as a parameter if the `log_type` is recognized. This streamlines the logging process and reduces redundancy in log statements.
 
-## [v1.1.0] - 2026-04-08
+## [1.1.0] - 2026-04-08
 
 ### Added
 
@@ -275,6 +298,6 @@ None
 
 ---
 
-[Unreleased]: https://github.com/dungtq2k5/smartdoc-ai/compare/v1.1.0...HEAD
-[1.1.0]: https://github.com/dungtq2k5/smartdoc-ai/compare/v1.0.0...1.1.0
-[1.0.0]: https://github.com/dungtq2k5/smartdoc-ai/releases/tag/v1.0.0
+[Unreleased]: https://github.com/dungtq2k5/smartdoc-ai/compare/1.1.0...HEAD
+[1.1.0]: https://github.com/dungtq2k5/smartdoc-ai/compare/1.0.0...1.1.0
+[1.0.0]: https://github.com/dungtq2k5/smartdoc-ai/releases/tag/1.0.0
