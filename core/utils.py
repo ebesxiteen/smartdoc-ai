@@ -1053,10 +1053,10 @@ def process_user_query(
     # Step 5: Retrieve source documents for display (only if not a general question)
     sources: List[Dict[str, Any]] = []
 
-    if not is_general_answer and print_debug:
-        debug_log("INFO", "📎", "Gathering exact retrieved sources for display...")
-
     if not is_general_answer:
+        if print_debug:
+            debug_log("INFO", "📎", "Gathering exact retrieved sources for display...")
+
         # Prefer the sources captured by the Self-RAG pipeline and stored in session state.
         # chain_input_dict["__retrieved_docs__"] is never populated by self_rag_wrapper()
         # because the wrapper only writes to st.session_state.self_rag_metadata["sources"].
@@ -1473,9 +1473,11 @@ def retrieve_quality_chunks(
                             docs.append(doc)
                     return docs
 
-            bm25_retriever.k = k * 2
+            sem_k = max(1, round(k * weight_semantic))
+            bm25_k = max(1, round(k * weight_bm25))
+            bm25_retriever.k = bm25_k
             base_retriever = CustomFAISSRetriever(
-                vectorstore=vectorstore, k=k * 2, score_threshold=score_threshold
+                vectorstore=vectorstore, k=sem_k, score_threshold=score_threshold
             )
             ensemble = EnsembleRetriever(
                 retrievers=[base_retriever, bm25_retriever],
