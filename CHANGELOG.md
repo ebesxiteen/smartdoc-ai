@@ -56,6 +56,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Co-RAG Reasoning Trace Persistence**: The `horizontal_trace` (full Generator↔Reviewer step log) from each Co-RAG run is stored in `chat_messages.co_rag_reasoning_trace` and reconstructed on chat history load for UI display.
 - **Shared RAG Style Rules** (`SHARED_RAG_STYLE_RULES` in `core/configs.py`): A unified set of style and grounding rules injected into both Self-RAG and Co-RAG prompts to enforce a consistent brand voice (language matching, no structural headers, grounding, conciseness, technical term preservation) across both pipelines.
 - **Enhanced Settings Warnings for Self-RAG & Co-RAG**: The Notebook Settings validation panel now covers Self-RAG performance warnings (complex search, perfectionist trap, redundant retries, high branching, loose evidence gate), Co-RAG dual-pipeline fatigue warnings, and cross-pipeline latency alerts.
+- **System Architecture Diagrams** (`diagrams/`): Added 7 Mermaid flowchart diagrams with written step-by-step descriptions covering every component of the dual-pipeline RAG system:
+  - `contextual-reformulation.md` — Query reformulation flow using per-pipeline isolated chat history.
+  - `greeting-detection.md` — 2-layer greeting detection: regex fast-path (Layer 1) + LLM intent classifier (Layer 2).
+  - `search.md` — Search engine modes: pure semantic, pure BM25, and hybrid RRF with proportional `k` split by weight.
+  - `reranking.md` — Cross-Encoder reranking with hybrid deduplication and conditional skip logic.
+  - `self-rag.md` — Full Self-RAG pipeline (search plan → multi-hop retrieval with surgical retry → candidate generation → quality scoring → repair loop).
+  - `co-rag.md` — Full Co-RAG pipeline (holistic retrieval → Generator Mode A → Generator↔Reviewer loop).
+  - `rag(system).md` — End-to-end dual-pipeline system view: `run_dual_rag()` sequential execution and dual-tab UI display.
 
 ### Changed
 
@@ -68,6 +76,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Hybrid Search Proportional `k` Split** (`core/utils.py`): Fixed a critical bug where both the semantic and BM25 retrievers in hybrid mode each fetched `k * 2` documents regardless of their configured weights. The retrievers now split `rag_rerank_top_n` proportionally: `sem_k = max(1, round(k × weight_semantic))` and `bm25_k = max(1, round(k × weight_bm25))`. For example, with `rag_rerank_top_n = 10` and weights `0.7 : 0.3`, semantic now fetches 7 and BM25 fetches 3 instead of both fetching 20.
+- **Debug Log Guard in `process_user_query`** (`core/utils.py`): Moved the `debug_log("Gathering sources…")` call inside the `if not is_general_answer:` guard so it no longer executes unconditionally on general-knowledge answers.
 - **Debug Log Function Usage**: Corrected the `LOG_CATEGORIES` in `/core/utils.py` and optimized the usage of the `debug_log` function in `app.py` and `core/utils.py` to ensure there's no need to provide emojis as a parameter if the `log_type` is recognized. This streamlines the logging process and reduces redundancy in log statements.
 
 ## [1.1.0] - 2026-04-08

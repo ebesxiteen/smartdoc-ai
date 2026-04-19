@@ -261,6 +261,20 @@ Every user query runs both pipelines independently and returns a combined result
 
 - [CHANGELOG.md](./CHANGELOG.md) — Version history and release notes
 
+## 🗺️ System Diagrams
+
+Detailed architecture diagrams for every component of the dual-pipeline RAG system, each with a Mermaid flowchart and a written step-by-step description.
+
+| Diagram | Description |
+| --------- | ------------- |
+| [Contextual Query Reformulation](./diagrams/contextual-reformulation.md) | How follow-up queries are rewritten into standalone queries using per-pipeline chat history |
+| [Greeting Detection](./diagrams/greeting-detection.md) | 2-layer intent routing: regex fast-path (Layer 1) + LLM classifier fallback (Layer 2) |
+| [Search Engine](./diagrams/search.md) | Pure semantic, pure BM25, and hybrid RRF search modes with proportional k-split and fallback logic |
+| [Cross-Encoder Reranking](./diagrams/reranking.md) | Deduplication for hybrid results, Cross-Encoder scoring, and top-k selection |
+| [Self-RAG Pipeline](./diagrams/self-rag.md) | Full 5-step multi-hop pipeline: search plan → retrieval with surgical retry → candidate generation → quality scoring → repair loop |
+| [Co-RAG Pipeline](./diagrams/co-rag.md) | Full holistic pipeline: reformulation → single-shot retrieval → Generator Mode A → Generator↔Reviewer review loop |
+| [Dual-Pipeline System](./diagrams/rag(system).md) | End-to-end view of `run_dual_rag()`: how Self-RAG and Co-RAG run sequentially and display results side-by-side |
+
 ## 🎓 Academic Context
 
 This project was developed as part of the **Open Source Software Development (OSSD)** course at **Đại học Sài Gòn** (Saigon University), Spring 2026.
