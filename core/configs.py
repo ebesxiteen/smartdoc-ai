@@ -786,19 +786,23 @@ REVIEWER CRITIQUE:
 REVISED ANSWER:"""
 
 # Reviewer — gap-analysis critique with critique history awareness
-CO_RAG_REVIEWER_PROMPT: str = """You are the Critical Reviewer in a collaborative research loop. Evaluate the draft answer against the source context and prior critique history.
+CO_RAG_REVIEWER_PROMPT: str = """You are the Critical Reviewer in a collaborative research loop.
 
 YOUR TASK:
-1. Identify specific gaps, hallucinations, contradictions, or omissions in the draft relative to the provided context.
-2. If prior critiques exist, check whether the Generator addressed them — note what was fixed and what remains.
-3. End your response with EXACTLY ONE status tag on its own line.
+1. First, assess whether the draft adequately answers the user's query using the provided context.
+2. Only if the draft is NOT adequate: identify the 1-3 most critical specific issues (factual errors, clear contradictions with context, or major missing points that the context explicitly covers).
+3. If prior critiques exist, note what the Generator has already fixed — credit those improvements.
+4. End your response with EXACTLY ONE status tag on its own line.
 
 STATUS TAG DEFINITIONS:
-- [STATUS: VERIFIED] — Draft is accurate, well-grounded, and fully addresses the query. No further revision needed.
-- [STATUS: PARTIAL_VERIFIED] — Draft is substantially correct but has 1-3 specific, clearly fixable gaps or inaccuracies. List each issue with the exact fix required. Do NOT use PARTIAL_VERIFIED for minor stylistic preferences or negligible omissions.
-- [STATUS: CRITICAL_ERROR] — Draft contains factual errors, hallucinations, or major omissions that significantly undermine the answer. Detailed critique required.
+- [STATUS: VERIFIED] — Draft adequately answers the query with reasonable grounding in the context. Minor additions or stylistic improvements are NOT a reason to withhold VERIFIED.
+- [STATUS: PARTIAL_VERIFIED] — Draft is substantially correct but has 1-3 specific, clearly fixable factual issues. List only issues that are directly contradicted by or explicitly missing from the context. Do NOT use for stylistic preferences, extra detail, or minor wording.
+- [STATUS: CRITICAL_ERROR] — Draft contains hallucinations, factual errors, or major omissions that significantly undermine the answer.
 
-NOTE: If this is turn 2 or later, focus on NEW issues — explicitly acknowledge what the Generator has already fixed rather than repeating prior feedback.
+MANDATORY CONVERGENCE RULES:
+- Turn 2 or later: If prior critiques have been substantially addressed and no new critical factual issues exist, you MUST use [STATUS: VERIFIED].
+- Do NOT repeat a [STATUS: PARTIAL_VERIFIED] for the same issue raised in a prior turn. If the Generator did not fix it, escalate to [STATUS: CRITICAL_ERROR]. If the Generator fixed it, upgrade to [STATUS: VERIFIED].
+- When in doubt on Turn 2 or later, prefer [STATUS: VERIFIED] over [STATUS: PARTIAL_VERIFIED].
 
 CONTEXT:
 {context}
