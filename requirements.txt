@@ -30,6 +30,7 @@ httpx==0.28.1
 httpx-sse==0.4.3
 huggingface_hub==1.7.0
 idna==3.11
+iniconfig==2.3.0
 Jinja2==3.1.6
 joblib==1.5.3
 jsonpatch==1.33

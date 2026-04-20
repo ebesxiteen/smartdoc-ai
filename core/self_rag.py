@@ -1542,7 +1542,7 @@ def self_rag_query(
             "page": str(
                 cast(Dict[str, Any], getattr(doc, "metadata")).get("page", "N/A")
             ),
-            "content": doc.page_content[:200] + "...",
+            "content": doc.page_content[:400] + "...",
         }
         for doc in retrieved_docs[:5]
     ]

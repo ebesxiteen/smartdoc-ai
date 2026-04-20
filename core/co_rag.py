@@ -663,7 +663,7 @@ def co_rag_query(
             "page": str(
                 cast(Dict[str, Any], getattr(doc, "metadata")).get("page", "N/A")
             ),
-            "content": doc.page_content[:200] + "...",
+            "content": doc.page_content[:400] + "...",
         }
         for doc in state.holistic_context_docs[:5]
     ]

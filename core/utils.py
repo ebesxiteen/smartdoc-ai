@@ -466,6 +466,218 @@ def debug_log(
 # ============================================================================
 
 
+def _clean_markdown_text(text: str) -> str:
+    """Normalize Markdown text extracted from documents.
+
+    Collapses 3+ consecutive blank lines to 2, removes stray page-number-only
+    lines (single integer on their own line), and strips leading/trailing whitespace.
+    Intentionally preserves Markdown syntax characters (#, *, |, etc.).
+    """
+    # Remove lines that are solely an integer (common PDF header/footer page numbers)
+    text = re.sub(r"^\s*\d+\s*$", "", text, flags=re.MULTILINE)
+    # Collapse 3+ consecutive blank lines to 2
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _pdf_to_markdown(
+    file_path: str,
+    progress_callback: Optional[Callable[[str], None]] = None,
+) -> List[Tuple[int, str]]:
+    """Extract per-page Markdown from a PDF using PyMuPDF's structured dict extraction.
+
+    Uses ``page.get_text("dict")`` (available in all PyMuPDF versions) to retrieve
+    text spans with font-size and flag metadata.  Heading levels are inferred by
+    comparing each block's dominant font size against the page-level median;
+    bold/italic are detected via span flags and rendered as ``**text**`` / ``*text*``.
+
+    Args:
+        file_path: Path to the PDF file.
+        progress_callback: Optional callable for UI progress updates.
+
+    Returns:
+        List of (1-based page number, cleaned Markdown string) tuples.
+        Pages that produce empty Markdown after cleaning are excluded.
+    """
+    import fitz  # type: ignore[import-untyped]  # PyMuPDF
+
+    pages: List[Tuple[int, str]] = []
+    doc = fitz.open(file_path)  # type: ignore[attr-defined]
+    try:
+        for page_idx in range(len(doc)):  # type: ignore[arg-type]
+            page = doc[page_idx]  # type: ignore[index]
+            if progress_callback:
+                progress_callback(f"Converting page {page_idx + 1} to Markdown...")
+
+            page_dict: Dict[str, Any] = page.get_text("dict", sort=True)  # type: ignore[attr-defined]
+            blocks: List[Any] = page_dict.get("blocks", [])
+
+            # Collect all font sizes on this page for median-based heading detection
+            all_sizes: List[float] = []
+            for blk in blocks:
+                if blk.get("type") != 0:
+                    continue
+                for ln in blk.get("lines", []):
+                    for span in ln.get("spans", []):
+                        sz = span.get("size")
+                        if sz:
+                            all_sizes.append(float(sz))
+
+            median_size: float = (
+                sorted(all_sizes)[len(all_sizes) // 2] if all_sizes else 12.0
+            )
+
+            block_lines: List[str] = []
+            for blk in blocks:
+                if blk.get("type") != 0:  # skip image/drawing blocks
+                    continue
+
+                # Determine dominant font size from the first span in the block
+                first_size: float = median_size
+                found_first = False
+                for ln in blk.get("lines", []):
+                    for span in ln.get("spans", []):
+                        sz = span.get("size")
+                        if sz:
+                            first_size = float(sz)
+                            found_first = True
+                            break
+                    if found_first:
+                        break
+
+                # Assemble block text from spans, rendering inline bold/italic
+                span_parts: List[str] = []
+                for ln in blk.get("lines", []):
+                    for span in ln.get("spans", []):
+                        t: str = span.get("text", "").strip()
+                        if not t:
+                            continue
+                        flags: int = int(span.get("flags", 0))
+                        is_bold = bool(flags & (1 << 4))
+                        is_italic = bool(flags & (1 << 1))
+                        if is_bold and is_italic:
+                            t = f"***{t}***"
+                        elif is_bold:
+                            t = f"**{t}**"
+                        elif is_italic:
+                            t = f"*{t}*"
+                        span_parts.append(t)
+
+                block_text = " ".join(span_parts).strip()
+                if not block_text:
+                    continue
+
+                # Promote block to a Markdown heading if its font is larger than median
+                if first_size >= median_size * 1.5:
+                    block_text = f"# {block_text}"
+                elif first_size >= median_size * 1.25:
+                    block_text = f"## {block_text}"
+                elif first_size >= median_size * 1.1:
+                    block_text = f"### {block_text}"
+
+                block_lines.append(block_text)
+
+            md = _clean_markdown_text("\n\n".join(block_lines))
+            if md:
+                pages.append((page_idx + 1, md))
+    finally:
+        doc.close()  # type: ignore[attr-defined]
+    return pages
+
+
+def _docx_to_markdown(
+    file_path: str,
+    progress_callback: Optional[Callable[[str], None]] = None,
+) -> str:
+    """Convert a DOCX document to Markdown using python-docx structural parsing.
+
+    Converts paragraph styles to Markdown headings/lists, preserves inline bold
+    and italic formatting on runs, and converts tables to GitHub-Flavored Markdown
+    pipe-table syntax.  The body elements are walked in document order so
+    paragraphs and tables appear in the same position as in the original file.
+
+    Args:
+        file_path: Path to the DOCX file.
+        progress_callback: Optional callable for UI progress updates.
+
+    Returns:
+        Full document as a Markdown string.
+    """
+    import docx  # python-docx
+
+    if progress_callback:
+        progress_callback("Reading DOCX file...")
+
+    doc = docx.Document(file_path)
+
+    _HEADING_MAP: Dict[str, str] = {
+        "Heading 1": "#",
+        "Heading 2": "##",
+        "Heading 3": "###",
+        "Heading 4": "####",
+        "Heading 5": "#####",
+        "Heading 6": "######",
+    }
+
+    def _inline_format(para: Any) -> str:
+        """Render run-level bold/italic markup and join into a Markdown inline string."""
+        parts: List[str] = []
+        for run in para.runs:
+            t: str = run.text
+            if not t:
+                continue
+            if run.bold and run.italic:
+                t = f"***{t}***"
+            elif run.bold:
+                t = f"**{t}**"
+            elif run.italic:
+                t = f"*{t}*"
+            parts.append(t)
+        return "".join(parts) or para.text
+
+    def _para_to_md(para: Any) -> str:
+        style_name: str = para.style.name if para.style else "Normal"
+        text: str = para.text.strip()
+        if not text:
+            return ""
+        for heading, prefix in _HEADING_MAP.items():
+            if style_name.startswith(heading):
+                return f"{prefix} {text}"
+        if style_name.startswith("List Bullet") or style_name.startswith(
+            "List Paragraph"
+        ):
+            return f"- {text}"
+        if style_name.startswith("List Number"):
+            return f"1. {text}"
+        return _inline_format(para)
+
+    def _table_to_md(table: Any) -> List[str]:
+        """Render a table as GitHub-Flavored Markdown pipe-table rows."""
+        rows: List[str] = []
+        for r_idx, row in enumerate(table.rows):
+            cells = [c.text.strip().replace("\n", " ") for c in row.cells]
+            rows.append("| " + " | ".join(cells) + " |")
+            if r_idx == 0:
+                rows.append("| " + " | ".join(["---"] * len(cells)) + " |")
+        return rows
+
+    # Walk body elements in document order using lxml tag names — no private attributes
+    from docx.oxml.ns import qn  # type: ignore[import-untyped]
+    from docx.text.paragraph import Paragraph as DocxParagraph  # type: ignore[import-untyped]
+    from docx.table import Table as DocxTable  # type: ignore[import-untyped]
+
+    lines: List[str] = []
+    for child in doc.element.body:  # type: ignore[union-attr]
+        tag: str = getattr(child, "tag", "")  # type: ignore[arg-type]
+        if tag == qn("w:p"):
+            lines.append(_para_to_md(DocxParagraph(child, doc)))  # type: ignore[arg-type]
+        elif tag == qn("w:tbl"):
+            lines.extend(_table_to_md(DocxTable(child, doc)))  # type: ignore[arg-type]
+            lines.append("")  # blank line after table for Markdown compatibility
+
+    return _clean_markdown_text("\n".join(lines))
+
+
 def load_and_chunk_file(
     file_path: str,
     file_type: str,
@@ -475,106 +687,123 @@ def load_and_chunk_file(
     progress_callback: Optional[Callable[[str], None]] = None,
 ) -> List[Document]:
     """
-    Load a file (PDF or DOCX) and split it into overlapping text chunks.
+    Load a file (PDF or DOCX) and split it into Markdown-preserving chunks.
 
-    This function extracts text from PDF or DOCX files and uses a recursive
-    text splitter to create overlapping chunks suitable for embedding and RAG.
-    Progress updates can be provided via callback for UI integration.
+    Markdown-First Pipeline:
+      1. Convert the document to Markdown text (PDF via PyMuPDF ``page.get_markdown()``;
+         DOCX via structural python-docx conversion preserving headings, lists, tables).
+      2. Split primarily with ``MarkdownHeaderTextSplitter`` so each chunk is bounded
+         by document structure (sections/headings) and retains contextual headers.
+      3. Any section chunk that still exceeds *chunk_size* is further split with
+         ``RecursiveCharacterTextSplitter`` as a fallback, preserving ``\n\n``/``\n``
+         boundaries before resorting to mid-word breaks.
+      4. ``page_content`` retains all Markdown syntax characters so downstream
+         ``st.markdown()`` calls in the UI can render rich formatting.
 
     Args:
         file_path: Absolute path to the file to load.
-        file_type: File format - either "pdf" or "docx".
-        chunk_size: Maximum characters per chunk. Default from configs.py.
-        chunk_overlap: Character overlap between consecutive chunks. Default from configs.py.
-        print_debug: If True, log detailed processing information. Default False.
-        progress_callback: Optional callable to receive progress messages (e.g., for UI progress bar).
+        file_type: File format — either ``"pdf"`` or ``"docx"``.
+        chunk_size: Maximum characters per chunk. Default from ``configs.RAG_MAX_CHUNK_LEN``.
+        chunk_overlap: Character overlap between consecutive chunks. Default from ``configs.RAG_CHUNK_OVERLAP``.
+        print_debug: If True, emit detailed processing logs. Default False.
+        progress_callback: Optional callable for UI progress messages.
 
     Returns:
-        List[Document]: LangChain Document objects with chunked text content and metadata.
-                       Each document contains:
-                       - page_content: Chunk text
-                       - metadata: {"source": file_path, "page": page_number, "document": filename}
+        List[Document]: LangChain ``Document`` objects, each with:
+            - ``page_content``: Markdown-formatted chunk text.
+            - ``metadata``: ``{"source": file_path, "page": page_number, "document": filename}``
+              plus optional ``h1``/``h2``/``h3``/``h4`` header-context keys added by the splitter.
 
     Raises:
-        ValueError: If file_type is neither "pdf" nor "docx".
-        Exception: Various exceptions from PyMuPDF or python-docx if file parsing fails.
-
-    Example:
-        >>> chunks = load_and_chunk_file(
-        ...     "document.pdf",
-        ...     "pdf",
-        ...     chunk_size=1000,
-        ...     print_debug=True
-        ... )
-        >>> print(f"Created {len(chunks)} chunks")
+        ValueError: If *file_type* is neither ``"pdf"`` nor ``"docx"``.
+        Exception: Propagates from PyMuPDF or python-docx if file parsing fails.
     """
-    from langchain_text_splitters import RecursiveCharacterTextSplitter
+    from langchain_text_splitters import (
+        MarkdownHeaderTextSplitter,
+        RecursiveCharacterTextSplitter,
+    )
 
-    # Step 1: Load the Document
-    documents: List[Document] = []
+    _HEADERS_TO_SPLIT_ON = [
+        ("#", "h1"),
+        ("##", "h2"),
+        ("###", "h3"),
+        ("####", "h4"),
+    ]
+    md_splitter = MarkdownHeaderTextSplitter(
+        headers_to_split_on=_HEADERS_TO_SPLIT_ON,
+        strip_headers=False,  # Keep headers inside chunk text for LLM context
+    )
+    char_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        separators=["\n\n", "\n", " ", ""],
+    )
+
+    # --- Stage 1: Convert to per-page (PDF) or whole-doc (DOCX) Markdown Documents ---
+    raw_docs: List[Document] = []
+
     if file_type == "pdf":
-        from langchain_community.document_loaders import PyMuPDFLoader
-
-        loader = PyMuPDFLoader(file_path)
-        for i, page in enumerate(loader.lazy_load()):
-            documents.append(page)
-            if progress_callback:
-                progress_callback(f"Reading page {i + 1}...")
+        for page_num, md_text in _pdf_to_markdown(file_path, progress_callback):
+            raw_docs.append(
+                Document(
+                    page_content=md_text,
+                    metadata={"source": file_path, "page": page_num},
+                )
+            )
     elif file_type == "docx":
-        import docx
-
-        if progress_callback:
-            progress_callback("Reading DOCX file...")
-        doc = docx.Document(file_path)
-        full_text: List[str] = []
-        for para in doc.paragraphs:
-            if para.text.strip():
-                full_text.append(para.text)
-        for table in doc.tables:
-            for row in table.rows:
-                for cell in row.cells:
-                    if cell.text.strip():
-                        full_text.append(cell.text)
-        text = "\n".join(full_text)
-        if text.strip():
-            documents = [Document(page_content=text, metadata={"source": file_path})]
+        md_text = _docx_to_markdown(file_path, progress_callback)
+        if md_text.strip():
+            raw_docs.append(
+                Document(
+                    page_content=md_text,
+                    metadata={"source": file_path, "page": "N/A"},
+                )
+            )
     else:
         raise ValueError(f"Unsupported file type for loading: {file_type}")
 
     if print_debug:
+        total_chars = sum(len(d.page_content) for d in raw_docs)
         debug_log(
             "SUCCESS",
-            message=f"Loaded {file_type.upper()}: {file_path}\n      {len(documents)} pages | {sum(len(d.page_content) for d in documents)} chars",
+            message=f"Loaded {file_type.upper()}: {file_path}\n      "
+            f"{len(raw_docs)} section(s) | {total_chars} chars",
         )
 
-    # Step 2: Split into chunks
+    # --- Stage 2: Primary split by Markdown headings, fallback by character count ---
     if progress_callback:
         progress_callback("Chunking text...")
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
-        separators=[
-            "\n\n",
-            "\n",
-            " ",
-            "",
-        ],  # Split by paragraph, then line, then space, then character
-    )
 
-    chunks = text_splitter.split_documents(documents)
+    final_chunks: List[Document] = []
+    for raw_doc in raw_docs:
+        parent_meta: Dict[str, Any] = dict(raw_doc.metadata)  # type: ignore[arg-type]
+        header_chunks = md_splitter.split_text(raw_doc.page_content)
+        for header_chunk in header_chunks:
+            # Restore page/source metadata that MarkdownHeaderTextSplitter doesn't carry
+            chunk_meta: Dict[str, Any] = dict(header_chunk.metadata)  # type: ignore[arg-type]
+            chunk_meta.setdefault("page", parent_meta.get("page", "N/A"))
+            chunk_meta.setdefault("source", parent_meta.get("source", file_path))
+            header_chunk.metadata = chunk_meta  # type: ignore[assignment]
+            if len(header_chunk.page_content) > chunk_size:
+                # Section too large — subdivide while preserving inherited metadata
+                sub_chunks = char_splitter.split_documents([header_chunk])
+                final_chunks.extend(sub_chunks)
+            else:
+                final_chunks.append(header_chunk)
 
     if print_debug:
         avg_chunk_size = (
-            sum(len(chunk.page_content) for chunk in chunks) / len(chunks)
-            if chunks
+            sum(len(c.page_content) for c in final_chunks) / len(final_chunks)
+            if final_chunks
             else 0
         )
         debug_log(
             "COMPLETE",
-            message=f"Chunking complete: {len(chunks)} chunks\n      Avg chunk size: {avg_chunk_size:.0f} chars",
+            message=f"Chunking complete: {len(final_chunks)} chunks\n      "
+            f"Avg chunk size: {avg_chunk_size:.0f} chars",
         )
 
-    return chunks
+    return final_chunks
 
 
 def hash_file_content(file_bytes: bytes) -> str:
@@ -664,23 +893,25 @@ def chunk_and_process_file(
     chunk_overlap: int = cfg.RAG_CHUNK_OVERLAP,
 ) -> Tuple[List[Document], int]:
     """
-    Load a file, split into chunks, and enrich with metadata.
+    Convert a file to Markdown, split into chunks, and enrich with metadata.
 
-    Wraps load_and_chunk_file() to add the original filename to chunk metadata
-    for source attribution in RAG responses.
+    Wraps ``load_and_chunk_file()`` (Markdown-first pipeline: PDF via PyMuPDF
+    font-analysis, DOCX via style mapping) and appends the original filename to
+    every chunk's ``metadata["document"]`` field for source attribution in RAG
+    responses.
 
     Args:
         file_path: Absolute path to the file.
-        file_type: "pdf" or "docx".
-        filename: Display name of the file (for metadata).
+        file_type: ``"pdf"`` or ``"docx"``.
+        filename: Display name of the file (stored in chunk metadata).
         print_debug: Enable debug logging.
         progress_callback: Optional progress update callback.
-        chunk_size: Maximum chunk size in characters.
-        chunk_overlap: Character overlap between chunks.
+        chunk_size: Maximum chunk size in characters (default ``RAG_MAX_CHUNK_LEN``).
+        chunk_overlap: Character overlap between consecutive chunks.
 
     Returns:
         Tuple[List[Document], int]: Tuple of:
-            - List of Document objects with metadata
+            - List of ``Document`` objects with Markdown ``page_content`` and metadata
             - Count of created chunks
     """
     if print_debug:
@@ -1094,8 +1325,8 @@ def process_user_query(
                     "document": str(doc_metadata.get("document", "Unknown")),
                     "page": str(doc_metadata.get("page", "N/A")),
                     "content": (
-                        doc.page_content[:200] + "..."
-                        if len(doc.page_content) > 200
+                        doc.page_content[:400] + "..."
+                        if len(doc.page_content) > 400
                         else doc.page_content
                     ),
                 }
@@ -1607,14 +1838,21 @@ def format_context_with_sources(
     print_debug: bool = False,
 ) -> str:
     """
-    Format retrieved documents into a context string with source citations.
-    Intelligently limits context to prevent GPU OOM during LLM inference.
+    Format retrieved Markdown chunks into a context string with source citations.
+
+    Preserves Markdown structure (headings, bold, italic, tables) within each
+    chunk so the LLM receives properly structured context. Normalizes excessive
+    blank lines (≥3 consecutive newlines → 2) without collapsing Markdown syntax
+    characters. Truncates individual chunks at ``max_chunk_length`` and stops
+    accumulating once the total exceeds ``RAG_MAX_CTX_LEN`` to prevent GPU OOM.
 
     Args:
-      docs: List of Document objects (with optional similarity_score metadata)
+        docs: List of Document objects (with optional similarity_score metadata).
+        max_chunk_length: Per-chunk character limit before truncation.
+        print_debug: Emit detailed per-chunk logging when True.
 
     Returns:
-      Formatted context string with page numbers and citations
+        str: Newline-separated context string with ``[Source: Page N]`` prefixes.
     """
     if not docs:
         if print_debug:
@@ -1634,8 +1872,8 @@ def format_context_with_sources(
     for idx, doc in enumerate(docs, 1):
         metadata: dict[str, Any] = getattr(doc, "metadata", {})
         page_num = str(metadata.get("page", "Unknown"))
-        # Clean up the text: remove extra whitespace
-        text = " ".join(doc.page_content.split())
+        # Normalize whitespace: collapse 3+ blank lines but preserve Markdown structure
+        text = re.sub(r"\n{3,}", "\n\n", doc.page_content.strip())
 
         # Limit individual chunk to configured max length to keep relevant info focused
         if len(text) > max_chunk_length:

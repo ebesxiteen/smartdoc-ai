@@ -1408,9 +1408,10 @@ def chat_interface(notebook_name: str, print_debug: bool = False) -> None:
                             with st.expander(_VIEW_SOURCES_LABEL, expanded=False):
                                 for j, source in enumerate(message["self_rag_sources"]):
                                     st.markdown(
-                                        f"""<div class='source-citation'><strong>{j + 1}. {source["document"]} — Page {source["page"]}</strong><br><small>{source["content"]}</small></div>""",
-                                        unsafe_allow_html=True,
+                                        f"**{j + 1}. {source['document']} — Page {source['page']}**"
                                     )
+                                    with st.container(border=True):
+                                        st.markdown(source["content"])
                         if message.get("self_rag_reasoning_trace"):
                             with st.expander(
                                 "💭 Self-RAG Reasoning Trace", expanded=False
@@ -1446,9 +1447,10 @@ def chat_interface(notebook_name: str, print_debug: bool = False) -> None:
                             with st.expander(_VIEW_SOURCES_LABEL, expanded=False):
                                 for j, source in enumerate(message["co_rag_sources"]):
                                     st.markdown(
-                                        f"""<div class='source-citation'><strong>{j + 1}. {source["document"]} — Page {source["page"]}</strong><br><small>{source["content"]}</small></div>""",
-                                        unsafe_allow_html=True,
+                                        f"**{j + 1}. {source['document']} — Page {source['page']}**"
                                     )
+                                    with st.container(border=True):
+                                        st.markdown(source["content"])
                         if message.get("co_rag_reasoning_trace"):
                             with st.expander("⭐ Co-RAG Review Trace", expanded=False):
                                 st.markdown("**Generator↔Reviewer Collaboration:**")
@@ -1480,14 +1482,10 @@ def chat_interface(notebook_name: str, print_debug: bool = False) -> None:
                         with st.expander(_VIEW_SOURCES_LABEL, expanded=False):
                             for j, source in enumerate(message["self_rag_sources"]):
                                 st.markdown(
-                                    f"""
-                                        <div class='source-citation'>
-                                        <strong>{j + 1}. {source["document"]} — Page {source["page"]}</strong><br>
-                                        <small>{source["content"]}</small>
-                                        </div>
-                                        """,
-                                    unsafe_allow_html=True,
+                                    f"**{j + 1}. {source['document']} — Page {source['page']}**"
                                 )
+                                with st.container(border=True):
+                                    st.markdown(source["content"])
 
                     # Check for historical trace
                     if message.get("self_rag_reasoning_trace"):
@@ -1673,9 +1671,10 @@ def chat_interface(notebook_name: str, print_debug: bool = False) -> None:
                                 with st.expander(_VIEW_SOURCES_LABEL, expanded=False):
                                     for j, source in enumerate(sources):
                                         st.markdown(
-                                            f"""<div class='source-citation'><strong>{j + 1}. {source["document"]} — Page {source["page"]}</strong><br><small>{source["content"]}</small></div>""",
-                                            unsafe_allow_html=True,
+                                            f"**{j + 1}. {source['document']} — Page {source['page']}**"
                                         )
+                                        with st.container(border=True):
+                                            st.markdown(source["content"])
                         with tab_corag:
                             if co_rag_content:
                                 st.markdown(co_rag_content)
@@ -1685,9 +1684,10 @@ def chat_interface(notebook_name: str, print_debug: bool = False) -> None:
                                     ):
                                         for j, source in enumerate(co_rag_sources):
                                             st.markdown(
-                                                f"""<div class='source-citation'><strong>{j + 1}. {source["document"]} — Page {source["page"]}</strong><br><small>{source["content"]}</small></div>""",
-                                                unsafe_allow_html=True,
+                                                f"**{j + 1}. {source['document']} — Page {source['page']}**"
                                             )
+                                            with st.container(border=True):
+                                                st.markdown(source["content"])
                             else:
                                 st.markdown(
                                     "*(Co-RAG not available for this message.)*"
