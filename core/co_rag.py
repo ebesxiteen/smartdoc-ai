@@ -121,14 +121,10 @@ def _co_rag_retrieve(
     Returns:
         Updated CoRAGState with holistic_context_docs and co_rag_found_answer set.
     """
-    final_k = int(settings.get("rag_final_context_k", cfg.RAG_FINAL_CONTEXT_K))
-    rerank_top_n = int(settings.get("rag_rerank_top_n", cfg.RAG_RERANK_TOP_N))
-    min_results = int(
-        settings.get("rag_retrieval_min_results", cfg.RAG_RETRIEVAL_MIN_RESULTS)
-    )
-    score_threshold = float(
-        settings.get("rag_retrieval_score_threshold", cfg.RAG_RETRIEVAL_SCORE_THRESHOLD)
-    )
+    final_k = int(settings["rag_final_context_k"])
+    rerank_top_n = int(settings["rag_rerank_top_n"])
+    min_results = int(settings["rag_retrieval_min_results"])
+    score_threshold = float(settings["rag_retrieval_score_threshold"])
 
     if print_debug:
         debug_log(
@@ -145,8 +141,8 @@ def _co_rag_retrieve(
         min_results=min_results,
         score_threshold=score_threshold,
         print_debug=print_debug,
-        weight_semantic=float(settings.get("weight_semantic", cfg.WEIGHT_SEMANTIC)),
-        weight_bm25=float(settings.get("weight_bm25", cfg.WEIGHT_BM25)),
+        weight_semantic=float(settings["weight_semantic"]),
+        weight_bm25=float(settings["weight_bm25"]),
     )
 
     # Stage 2: cross-encoder reranking to final_k
@@ -404,9 +400,9 @@ def co_rag_query(
               Format: [{"step": "...", "action": "..."}]
     """
     settings = load_notebook_settings(notebook_id)
-    max_retries = int(settings.get("co_rag_max_retries", cfg.CO_RAG_MAX_RETRIES))
-    max_msg_history = int(settings.get("max_msg_history", cfg.MAX_MSG_HISTORY))
-    personal_ctx_raw: str = settings.get("personal_ctx") or ""
+    max_retries = int(settings["co_rag_max_retries"])
+    max_msg_history = int(settings["max_msg_history"])
+    personal_ctx_raw: str = settings["personal_ctx"] or ""
 
     if print_debug:
         debug_log("INFO", "═" * 70)
@@ -452,9 +448,9 @@ def co_rag_query(
             from langchain_ollama import OllamaLLM
 
             llm_chain = OllamaLLM(
-                model=settings.get("llm_model_name", cfg.LLM_MODEL_NAME),
+                model=settings["llm_model_name"],
                 base_url=cfg.LLM_BASE_URL,
-                temperature=settings.get("llm_avg_temp", cfg.LLM_AVG_TEMP),
+                temperature=settings["llm_avg_temp"],
             )
         except Exception as e:
             if print_debug:

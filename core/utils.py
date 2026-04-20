@@ -152,22 +152,19 @@ def load_notebook_settings(
     """
     Load notebook-specific settings from the database, with fallback to defaults.
 
-    Retrieves persisted settings for a specific notebook from the database.
-    If the notebook ID is None or notebook has no custom settings, returns
-    default settings from get_default_notebook_settings().
+    Retrieves persisted settings for a specific notebook from the database, merged
+    with defaults. ALWAYS returns a fully-populated dictionary — every key from
+    `get_default_notebook_settings()` is guaranteed to be present. DB NULL values
+    are replaced with config defaults, so callers can use `settings["key"]` directly
+    without fallbacks; any missing key is a bug that should raise a KeyError immediately.
 
     Args:
         notebook_id: The UUID of the notebook to load settings for.
-                    If None, default settings are returned.
+                    If None, the full default settings dict is returned.
 
     Returns:
-        Dict[str, Any]: Complete settings dictionary for the notebook.
-                       If notebook has custom settings, those are merged with defaults.
-
-    Note:
-        This is an internal function used to ensure all RAG chains always have
-        complete settings dictionaries, even if the notebook doesn't have
-        explicitly saved settings.
+        Dict[str, Any]: Fully-populated settings dictionary. All keys from
+                       `get_default_notebook_settings()` are always present.
     """
     defaults = get_default_notebook_settings()
     if not notebook_id:
@@ -1019,9 +1016,9 @@ def process_user_query(
 
             settings = load_notebook_settings(notebook_id)
             llm = OllamaLLM(
-                model=settings.get("llm_model_name", cfg.LLM_MODEL_NAME),
+                model=settings["llm_model_name"],
                 base_url=cfg.LLM_BASE_URL,
-                temperature=settings.get("llm_avg_temp", cfg.LLM_AVG_TEMP),
+                temperature=settings["llm_avg_temp"],
             )
             answer_clean = generate_fallback_answer(
                 query,
@@ -1086,10 +1083,8 @@ def process_user_query(
                 min_results=int(settings["rag_retrieval_min_results"]),
                 score_threshold=float(settings["rag_retrieval_score_threshold"]),
                 print_debug=print_debug,
-                weight_semantic=float(
-                    settings.get("weight_semantic", cfg.WEIGHT_SEMANTIC)
-                ),
-                weight_bm25=float(settings.get("weight_bm25", cfg.WEIGHT_BM25)),
+                weight_semantic=float(settings["weight_semantic"]),
+                weight_bm25=float(settings["weight_bm25"]),
             )
 
             # Format sources for display

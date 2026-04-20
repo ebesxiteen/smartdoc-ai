@@ -2389,7 +2389,7 @@ def render_notebook_settings_sidebar(notebook_id: str) -> None:
         new_personal_ctx = st.text_area(
             "Personal Background & Instructions",
             key=f"pctx{k_suf}",
-            value=settings.get("personal_ctx", "") or "",
+            value=settings["personal_ctx"] or "",
             height=150,
             placeholder=cfg.PERSONAL_CTX_PLACEHOLDER,
             help=cfg.PERSONAL_CTX_HELP_MSG,
@@ -2402,7 +2402,7 @@ def render_notebook_settings_sidebar(notebook_id: str) -> None:
             min_value=cfg.WEIGHT_SEMANTIC_MIN,
             max_value=cfg.WEIGHT_SEMANTIC_MAX,
             step=cfg.WEIGHT_SEMANTIC_STEP,
-            value=float(settings.get("weight_semantic", cfg.WEIGHT_SEMANTIC)),
+            value=float(settings["weight_semantic"]),
             help=cfg.WEIGHT_SEMANTIC_HELP_MSG,
         )
 
@@ -2412,7 +2412,7 @@ def render_notebook_settings_sidebar(notebook_id: str) -> None:
             min_value=cfg.RAG_RERANK_TOP_N_MIN,
             max_value=cfg.RAG_RERANK_TOP_N_MAX,
             step=cfg.RAG_RERANK_TOP_N_STEP,
-            value=int(settings.get("rag_rerank_top_n", cfg.RAG_RERANK_TOP_N)),
+            value=int(settings["rag_rerank_top_n"]),
             placeholder=str(cfg.RAG_RERANK_TOP_N),
             help=cfg.RAG_RERANK_TOP_N_HELP_MSG,
         )
@@ -2500,7 +2500,7 @@ def render_notebook_settings_sidebar(notebook_id: str) -> None:
             min_value=cfg.SELF_RAG_MAX_DEPTH_MIN,
             max_value=cfg.SELF_RAG_MAX_DEPTH_MAX,
             step=cfg.SELF_RAG_MAX_DEPTH_STEP,
-            value=int(settings.get("self_rag_max_depth", cfg.SELF_RAG_MAX_DEPTH)),
+            value=int(settings["self_rag_max_depth"]),
             help=cfg.SELF_RAG_MAX_DEPTH_HELP_MSG,
         )
 
@@ -2510,7 +2510,7 @@ def render_notebook_settings_sidebar(notebook_id: str) -> None:
             min_value=cfg.SELF_RAG_CANDIDATES_MIN,
             max_value=cfg.SELF_RAG_CANDIDATES_MAX,
             step=cfg.SELF_RAG_CANDIDATES_STEP,
-            value=int(settings.get("self_rag_candidates", cfg.SELF_RAG_CANDIDATES)),
+            value=int(settings["self_rag_candidates"]),
             help=cfg.SELF_RAG_CANDIDATES_HELP_MSG,
         )
 
@@ -2520,11 +2520,7 @@ def render_notebook_settings_sidebar(notebook_id: str) -> None:
             min_value=cfg.SELF_RAG_MAX_RETRIES_PER_HOP_MIN,
             max_value=cfg.SELF_RAG_MAX_RETRIES_PER_HOP_MAX,
             step=cfg.SELF_RAG_MAX_RETRIES_PER_HOP_STEP,
-            value=int(
-                settings.get(
-                    "self_rag_max_retries_per_hop", cfg.SELF_RAG_MAX_RETRIES_PER_HOP
-                )
-            ),
+            value=int(settings["self_rag_max_retries_per_hop"]),
             help=cfg.SELF_RAG_MAX_RETRIES_PER_HOP_HELP_MSG,
         )
 
@@ -2535,7 +2531,7 @@ def render_notebook_settings_sidebar(notebook_id: str) -> None:
             min_value=cfg.SELF_RAG_THRESHOLD_ISSUP_MIN,
             max_value=cfg.SELF_RAG_THRESHOLD_ISSUP_MAX,
             step=cfg.SELF_RAG_THRESHOLD_ISSUP_STEP,
-            value=float(settings.get("self_rag_threshold_issup", 0.70)),
+            value=float(settings["self_rag_threshold_issup"]),
             help=cfg.SELF_RAG_THRESHOLD_ISSUP_HELP_MSG,
         )
 
@@ -2545,7 +2541,7 @@ def render_notebook_settings_sidebar(notebook_id: str) -> None:
             min_value=cfg.SELF_RAG_THRESHOLD_ISREL_MIN,
             max_value=cfg.SELF_RAG_THRESHOLD_ISREL_MAX,
             step=cfg.SELF_RAG_THRESHOLD_ISREL_STEP,
-            value=float(settings.get("self_rag_threshold_isrel", 0.70)),
+            value=float(settings["self_rag_threshold_isrel"]),
             help=cfg.SELF_RAG_THRESHOLD_ISREL_HELP_MSG,
         )
 
@@ -2555,7 +2551,7 @@ def render_notebook_settings_sidebar(notebook_id: str) -> None:
             min_value=cfg.SELF_RAG_THRESHOLD_ISUSE_MIN,
             max_value=cfg.SELF_RAG_THRESHOLD_ISUSE_MAX,
             step=cfg.SELF_RAG_THRESHOLD_ISUSE_STEP,
-            value=float(settings.get("self_rag_threshold_isuse", 0.70)),
+            value=float(settings["self_rag_threshold_isuse"]),
             help=cfg.SELF_RAG_THRESHOLD_ISUSE_HELP_MSG,
         )
 
@@ -2566,7 +2562,7 @@ def render_notebook_settings_sidebar(notebook_id: str) -> None:
             min_value=cfg.CO_RAG_MAX_RETRIES_MIN,
             max_value=cfg.CO_RAG_MAX_RETRIES_MAX,
             step=cfg.CO_RAG_MAX_RETRIES_STEP,
-            value=int(settings.get("co_rag_max_retries", cfg.CO_RAG_MAX_RETRIES)),
+            value=int(settings["co_rag_max_retries"]),
             help=cfg.CO_RAG_MAX_RETRIES_HELP_MSG,
         )
 

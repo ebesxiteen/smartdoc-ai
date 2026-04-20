@@ -134,10 +134,10 @@ def run_dual_rag(
 
         settings = load_notebook_settings(notebook_id)
         llm = OllamaLLM(
-            model=settings.get("llm_model_name", cfg.LLM_MODEL_NAME),
+            model=settings["llm_model_name"],
             base_url=cfg.LLM_BASE_URL,
-            temperature=settings.get("llm_avg_temp", cfg.LLM_AVG_TEMP),
-            num_ctx=int(settings.get("llm_num_ctx", cfg.LLM_NUM_CTX)),
+            temperature=settings["llm_avg_temp"],
+            num_ctx=int(settings["llm_num_ctx"]),
         )
 
         (

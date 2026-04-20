@@ -128,17 +128,15 @@ def reformulate_query_with_history(
         from langchain_core.prompts import ChatPromptTemplate
         from langchain_ollama import OllamaLLM
 
-        settings = settings or (
-            load_notebook_settings(notebook_id) if notebook_id else {}
-        )
+        settings = settings or load_notebook_settings(notebook_id)
         llm = OllamaLLM(
-            model=settings.get("llm_model_name", cfg.LLM_MODEL_NAME),
+            model=settings["llm_model_name"],
             base_url=cfg.LLM_BASE_URL,
             temperature=0.1,  # Keep it deterministic
         )
 
         # Format chat history using notebook-configured max_msg_history
-        _max_hist = max(1, int(settings.get("max_msg_history", cfg.MAX_MSG_HISTORY)))
+        _max_hist = max(1, int(settings["max_msg_history"]))
         history_str = "\n".join(
             [
                 f"- {(msg.get('role', 'user') if hasattr(msg, 'get') else getattr(msg, 'type', 'user')).upper()}: "
@@ -466,9 +464,7 @@ def retrieve_with_surgical_retry(
         progress_callback("📚 Step 2: Retrieving documents...")
 
     settings = load_notebook_settings(notebook_id)
-    max_retries = settings.get(
-        "self_rag_max_retries_per_hop", cfg.SELF_RAG_MAX_RETRIES_PER_HOP
-    )
+    max_retries = settings["self_rag_max_retries_per_hop"]
 
     # Use dict keyed on content hash for O(1) deduplication
     all_docs: Dict[int, Document] = {}
@@ -496,16 +492,11 @@ def retrieve_with_surgical_retry(
                 docs = retrieve_quality_chunks(
                     vectorstore,
                     current_sq,
-                    k=settings.get("rag_rerank_top_n", cfg.RAG_RERANK_TOP_N),
-                    score_threshold=settings.get(
-                        "rag_retrieval_score_threshold",
-                        cfg.RAG_RETRIEVAL_SCORE_THRESHOLD,
-                    ),
+                    k=settings["rag_rerank_top_n"],
+                    score_threshold=settings["rag_retrieval_score_threshold"],
                     print_debug=print_debug,
-                    weight_semantic=float(
-                        settings.get("weight_semantic", cfg.WEIGHT_SEMANTIC)
-                    ),
-                    weight_bm25=float(settings.get("weight_bm25", cfg.WEIGHT_BM25)),
+                    weight_semantic=float(settings["weight_semantic"]),
+                    weight_bm25=float(settings["weight_bm25"]),
                 )
 
                 if docs:
@@ -604,7 +595,7 @@ def retrieve_with_surgical_retry(
 
     # Stage 2: Cross-Encoder re-ranking
     # Reduces the large `rag_rerank_top_n` pool down to `rag_final_context_k` most relevant items
-    final_k = settings.get("rag_final_context_k", cfg.RAG_FINAL_CONTEXT_K)
+    final_k = settings["rag_final_context_k"]
     state.retrieval_pool = rerank_with_cross_encoder(
         query=state.original_query,  # Use original query as the benchmark
         candidates=state.retrieval_pool,
@@ -673,9 +664,7 @@ def generate_candidate_answers(
 
     # Format chat history if available
     chat_history_str = ""
-    max_history = int(
-        settings.get("max_msg_history", getattr(cfg, "MAX_MSG_HISTORY", 5))
-    )
+    max_history = int(settings["max_msg_history"])
     if chat_history and max_history > 0:
         chat_history_str = "\n".join(
             [
@@ -692,7 +681,7 @@ def generate_candidate_answers(
         from langchain_ollama import OllamaLLM
 
         current_time = datetime.now(timezone.utc).strftime("%A, %B %d, %Y at %H:%M UTC")
-        personal_ctx = settings.get("personal_ctx", None)
+        personal_ctx = settings["personal_ctx"]
 
         system_prompt_str = cfg.get_self_rag_system_prompt(
             personal_ctx=personal_ctx,
@@ -734,12 +723,12 @@ APPROACH: {hint}"""
             )
 
             # Recreate LLM with slightly varied temperature for true candidate diversity
-            base_temp = settings.get("llm_avg_temp", getattr(cfg, "LLM_AVG_TEMP", 0.7))
+            base_temp = settings["llm_avg_temp"]
             var_temp = base_temp + (i * 0.05)
 
             try:
                 temp_llm = OllamaLLM(
-                    model=settings.get("llm_model_name", cfg.LLM_MODEL_NAME),
+                    model=settings["llm_model_name"],
                     base_url=cfg.LLM_BASE_URL,
                     temperature=var_temp,
                 )
@@ -834,16 +823,10 @@ def score_candidates_with_judges(
 
     scored_candidates: List[Dict[str, Any]] = []
 
-    settings = load_notebook_settings(notebook_id) if notebook_id else {}
-    issup_threshold = settings.get(
-        "self_rag_threshold_issup", getattr(cfg, "SELF_RAG_THRESHOLD_ISSUP", 0.7)
-    )
-    isrel_threshold = settings.get(
-        "self_rag_threshold_isrel", getattr(cfg, "SELF_RAG_THRESHOLD_ISREL", 0.7)
-    )
-    isuse_threshold = settings.get(
-        "self_rag_threshold_isuse", getattr(cfg, "SELF_RAG_THRESHOLD_ISUSE", 0.7)
-    )
+    settings = load_notebook_settings(notebook_id)
+    issup_threshold = settings["self_rag_threshold_issup"]
+    isrel_threshold = settings["self_rag_threshold_isrel"]
+    isuse_threshold = settings["self_rag_threshold_isuse"]
 
     try:
         import json
@@ -1094,15 +1077,9 @@ def validate_winner_against_thresholds(
 
     settings = load_notebook_settings(notebook_id)
 
-    issup_threshold = settings.get(
-        "self_rag_threshold_issup", cfg.SELF_RAG_THRESHOLD_ISSUP
-    )
-    isrel_threshold = settings.get(
-        "self_rag_threshold_isrel", cfg.SELF_RAG_THRESHOLD_ISREL
-    )
-    isuse_threshold = settings.get(
-        "self_rag_threshold_isuse", cfg.SELF_RAG_THRESHOLD_ISUSE
-    )
+    issup_threshold = settings["self_rag_threshold_issup"]
+    isrel_threshold = settings["self_rag_threshold_isrel"]
+    isuse_threshold = settings["self_rag_threshold_isuse"]
 
     issup = winner.get("issup", 0.0)
     isrel = winner.get("isrel", 0.0)
@@ -1192,15 +1169,9 @@ def repair_failed_answer(
         List[str]: New sub-queries for the next repair hop (max 3).
     """
     settings = load_notebook_settings(notebook_id)
-    issup_threshold = settings.get(
-        "self_rag_threshold_issup", cfg.SELF_RAG_THRESHOLD_ISSUP
-    )
-    isrel_threshold = settings.get(
-        "self_rag_threshold_isrel", cfg.SELF_RAG_THRESHOLD_ISREL
-    )
-    isuse_threshold = settings.get(
-        "self_rag_threshold_isuse", cfg.SELF_RAG_THRESHOLD_ISUSE
-    )
+    issup_threshold = settings["self_rag_threshold_issup"]
+    isrel_threshold = settings["self_rag_threshold_isrel"]
+    isuse_threshold = settings["self_rag_threshold_isuse"]
 
     failures: List[str] = []
     if winner.get("issup", 0.0) < issup_threshold:
@@ -1315,8 +1286,8 @@ def self_rag_query(
 
     # Load settings once before pipeline begins (LLM init + intent routing both need it)
     settings = load_notebook_settings(notebook_id)
-    max_depth = settings.get("self_rag_max_depth", cfg.SELF_RAG_MAX_DEPTH)
-    max_candidates = settings.get("self_rag_candidates", cfg.SELF_RAG_CANDIDATES)
+    max_depth = settings["self_rag_max_depth"]
+    max_candidates = settings["self_rag_candidates"]
 
     # Initialize LLM chain if not provided
     if llm_chain is None:
@@ -1324,9 +1295,9 @@ def self_rag_query(
             from langchain_ollama import OllamaLLM
 
             llm = OllamaLLM(
-                model=settings.get("llm_model_name", cfg.LLM_MODEL_NAME),
+                model=settings["llm_model_name"],
                 base_url=cfg.LLM_BASE_URL,
-                temperature=settings.get("llm_avg_temp", cfg.LLM_AVG_TEMP),
+                temperature=settings["llm_avg_temp"],
             )
             llm_chain = llm
         except Exception as e:
