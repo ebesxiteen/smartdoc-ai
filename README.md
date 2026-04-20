@@ -214,10 +214,13 @@ smartdoc-ai/
 
 #### Pipeline 1: Ingestion (Document Upload)
 
-1. Extract text from PDF using PyMuPDF or Word using python-docx
-2. Split text into overlapping chunks (RecursiveCharacterTextSplitter)
-3. Embed chunks using sentence-transformers
-4. Store embeddings in FAISS; metadata in SQLite
+1. **Type detection** — file magic bytes determine PDF or DOCX; unsupported types are rejected immediately.
+2. **Duplicate detection** — MD5 hash of file bytes; skip if already uploaded to this notebook.
+3. **Markdown conversion** — PDF pages are converted to Markdown via PyMuPDF `page.get_text("dict")` with font-size-ratio heading inference (`#`/`##`/`###`) and span-flag bold/italic. DOCX documents are walked in element order (`qn("w:p")` / `qn("w:tbl")`) to produce Markdown headings, lists, and pipe tables.
+4. **Cleaning** — `_clean_markdown_text()` removes stray page-number lines and collapses excess blank lines.
+5. **Markdown-aware chunking** — `MarkdownHeaderTextSplitter` (`#`–`####`) splits by document structure; oversized sections fall back to `RecursiveCharacterTextSplitter`. Heading context is retained inside each chunk.
+6. **Embedding** — `paraphrase-multilingual-mpnet-base-v2` (768-dim), GPU-first with CPU fallback.
+7. **Storage** — per-source FAISS `IndexFlatL2` index saved to `./data/vectorstores/{notebook_id}/{source_id}/`; metadata persisted to SQLite `sources` table.
 
 #### Pipeline 2: Query (User Question — Dual Pipeline via `run_dual_rag()`)
 
@@ -254,8 +257,8 @@ Every user query runs both pipelines independently and returns a combined result
 ## 📊 Project Status
 
 **Version**: 1.2.0 (Dual-Pipeline Release)
-**Completion**: 84.6% (99/117 development tasks completed)
-**Last Updated**: April 18, 2026
+**Completion**: 87.2% (102/117 development tasks completed)
+**Last Updated**: April 20, 2026
 
 ## 📚 Documentation
 
@@ -267,6 +270,7 @@ Detailed architecture diagrams for every component of the dual-pipeline RAG syst
 
 | Diagram | Description |
 | --------- | ------------- |
+| [Ingestion Pipeline](./diagrams/ingestion.md) | Full document ingestion flow: file-type detection, duplicate check, PDF/DOCX→Markdown conversion, Markdown-aware chunking, embedding, FAISS index creation, SQLite persistence |
 | [Contextual Query Reformulation](./diagrams/contextual-reformulation.md) | How follow-up queries are rewritten into standalone queries using per-pipeline chat history |
 | [Greeting Detection](./diagrams/greeting-detection.md) | 2-layer intent routing: regex fast-path (Layer 1) + LLM classifier fallback (Layer 2) |
 | [Search Engine](./diagrams/search.md) | Pure semantic, pure BM25, and hybrid RRF search modes with proportional k-split and fallback logic |
