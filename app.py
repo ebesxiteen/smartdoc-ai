@@ -52,7 +52,7 @@ DATA_DIR = Path("data")
 
 DATA_DIR.mkdir(exist_ok=True)
 CHUNKS_PROGRESS_REGEX = r"chunks \d+ to (\d+) of (\d+)"
-_VIEW_SOURCES_LABEL = "✨ View sources"
+_VIEW_SOURCES_LABEL = "View sources"
 
 # ============================================================================
 # PAGE CONFIGURATION
@@ -1388,7 +1388,7 @@ def chat_interface(notebook_name: str, print_debug: bool = False) -> None:
             suggestions_placeholder.empty()
 
         # Display chat history (proper left/right layout)
-        for _, message in enumerate(st.session_state.chat_history):
+        for msg_idx, message in enumerate(st.session_state.chat_history):
             if message["role"] == cfg.USER_ROLE_NAME:
                 render_user_message(message["content"])
             else:
@@ -1402,118 +1402,89 @@ def chat_interface(notebook_name: str, print_debug: bool = False) -> None:
                         st.markdown(
                             message.get("self_rag_content") or message["content"]
                         )
-                        if message.get("self_rag_sources") and message.get(
-                            "self_rag_found_answer", True
-                        ):
-                            with st.expander(_VIEW_SOURCES_LABEL, expanded=False):
-                                for j, source in enumerate(message["self_rag_sources"]):
-                                    st.markdown(
-                                        f"**{j + 1}. {source['document']} — Page {source['page']}**"
-                                    )
-                                    with st.container(border=True):
-                                        st.markdown(source["content"])
-                        if message.get("self_rag_reasoning_trace"):
-                            with st.expander(
-                                "💭 Self-RAG Reasoning Trace", expanded=False
-                            ):
-                                st.markdown("**Multi-Hop Retrieval Execution:**")
-                                for i, step in enumerate(
-                                    message["self_rag_reasoning_trace"], 1
-                                ):
-                                    step_text = str(step).strip()
-                                    if step_text:
-                                        st.markdown(f"**Step {i}:** {step_text}")
-                                metrics = message.get("confidence_metrics")
-                                if metrics:
-                                    st.markdown("---")
-                                    st.markdown("**Confidence Scores:**")
-                                    st.markdown(
-                                        f"- **Total Score:** {metrics.get('total_score', 0.0):.2f}"
-                                    )
-                                    st.markdown(
-                                        f"- Groundedness (ISSUP): {metrics.get('issup', 0.0):.2f}"
-                                    )
-                                    st.markdown(
-                                        f"- Relevance (ISREL): {metrics.get('isrel', 0.0):.2f}"
-                                    )
-                                    st.markdown(
-                                        f"- Utility (ISUSE): {metrics.get('isuse', 0.0):.2f}"
-                                    )
+                        _srag_has_src = bool(
+                            message.get("self_rag_sources")
+                            and message.get("self_rag_found_answer", True)
+                        )
+                        _srag_has_trace = bool(message.get("self_rag_reasoning_trace"))
+                        if _srag_has_src or _srag_has_trace:
+                            _sc1, _sc2, _ = st.columns([3, 4, 5])
+                            with _sc1:
+                                if _srag_has_src:
+                                    if st.button(
+                                        _VIEW_SOURCES_LABEL,
+                                        key=f"srag_src_{msg_idx}",
+                                        use_container_width=False,
+                                    ):
+                                        view_sources_dialog(message["self_rag_sources"])
+                            with _sc2:
+                                if _srag_has_trace:
+                                    if st.button(
+                                        "Reasoning Trace",
+                                        key=f"srag_trace_{msg_idx}",
+                                        use_container_width=False,
+                                    ):
+                                        view_self_rag_trace_dialog(
+                                            message["self_rag_reasoning_trace"],
+                                            message.get("confidence_metrics"),
+                                        )
                     with tab_corag:
                         st.markdown(message["co_rag_content"])
-                        if message.get("co_rag_sources") and message.get(
-                            "co_rag_found_answer", True
-                        ):
-                            with st.expander(_VIEW_SOURCES_LABEL, expanded=False):
-                                for j, source in enumerate(message["co_rag_sources"]):
-                                    st.markdown(
-                                        f"**{j + 1}. {source['document']} — Page {source['page']}**"
-                                    )
-                                    with st.container(border=True):
-                                        st.markdown(source["content"])
-                        if message.get("co_rag_reasoning_trace"):
-                            with st.expander("⭐ Co-RAG Review Trace", expanded=False):
-                                st.markdown("**Generator↔Reviewer Collaboration:**")
-                                for i, step in enumerate(
-                                    message["co_rag_reasoning_trace"], 1
-                                ):
-                                    if isinstance(step, dict):
-                                        step_typed = cast(Dict[str, str], step)
-                                        step_label = (
-                                            step_typed.get("step") or f"Step {i}"
+                        _corag_has_src = bool(
+                            message.get("co_rag_sources")
+                            and message.get("co_rag_found_answer", True)
+                        )
+                        _corag_has_trace = bool(message.get("co_rag_reasoning_trace"))
+                        if _corag_has_src or _corag_has_trace:
+                            _cc1, _cc2, _ = st.columns([3, 4, 5])
+                            with _cc1:
+                                if _corag_has_src:
+                                    if st.button(
+                                        _VIEW_SOURCES_LABEL,
+                                        key=f"corag_src_{msg_idx}",
+                                        use_container_width=False,
+                                    ):
+                                        view_sources_dialog(message["co_rag_sources"])
+                            with _cc2:
+                                if _corag_has_trace:
+                                    if st.button(
+                                        "Review Trace",
+                                        key=f"corag_trace_{msg_idx}",
+                                        use_container_width=False,
+                                    ):
+                                        view_co_rag_trace_dialog(
+                                            message["co_rag_reasoning_trace"]
                                         )
-                                        step_action = (
-                                            step_typed.get("action") or ""
-                                        ).strip()
-                                        if step_action:
-                                            st.markdown(
-                                                f"**{step_label}:** {step_action}"
-                                            )
-                                    else:
-                                        step_text = str(step).strip()
-                                        if step_text:
-                                            st.markdown(f"**Turn {i}:** {step_text}")
                 else:
                     st.markdown(message["content"])
 
-                    if message.get("self_rag_sources") and message.get(
-                        "self_rag_found_answer", True
-                    ):
-                        with st.expander(_VIEW_SOURCES_LABEL, expanded=False):
-                            for j, source in enumerate(message["self_rag_sources"]):
-                                st.markdown(
-                                    f"**{j + 1}. {source['document']} — Page {source['page']}**"
-                                )
-                                with st.container(border=True):
-                                    st.markdown(source["content"])
-
-                    # Check for historical trace
-                    if message.get("self_rag_reasoning_trace"):
-                        with st.expander("💭 Self-RAG Reasoning Trace", expanded=False):
-                            st.markdown("**Multi-Hop Retrieval Execution:**")
-                            for i, step in enumerate(
-                                message["self_rag_reasoning_trace"], 1
-                            ):
-                                step_text = str(step).strip()
-                                if step_text:
-                                    st.markdown(f"**Step {i}:** {step_text}")
-
-                            metrics = message.get("confidence_metrics")
-                            if metrics:
-                                st.markdown("---")
-                                st.markdown("**Confidence Scores:**")
-                                st.markdown(
-                                    f"- **Total Score:** {metrics.get('total_score', 0.0):.2f}"
-                                )
-                                st.markdown(
-                                    f"- Groundedness (ISSUP): {metrics.get('issup', 0.0):.2f}"
-                                )
-                                st.markdown(
-                                    f"- Relevance (ISREL): {metrics.get('isrel', 0.0):.2f}"
-                                )
-                                st.markdown(
-                                    f"- Utility (ISUSE): {metrics.get('isuse', 0.0):.2f}"
-                                )
+                    _has_src = bool(
+                        message.get("self_rag_sources")
+                        and message.get("self_rag_found_answer", True)
+                    )
+                    _has_trace = bool(message.get("self_rag_reasoning_trace"))
+                    if _has_src or _has_trace:
+                        _bc1, _bc2, _ = st.columns([3, 4, 5])
+                        with _bc1:
+                            if _has_src:
+                                if st.button(
+                                    _VIEW_SOURCES_LABEL,
+                                    key=f"srag_src_{msg_idx}",
+                                    use_container_width=False,
+                                ):
+                                    view_sources_dialog(message["self_rag_sources"])
+                        with _bc2:
+                            # Check for historical trace
+                            if _has_trace:
+                                if st.button(
+                                    "Reasoning Trace",
+                                    key=f"srag_trace_{msg_idx}",
+                                    use_container_width=False,
+                                ):
+                                    view_self_rag_trace_dialog(
+                                        message["self_rag_reasoning_trace"],
+                                        message.get("confidence_metrics"),
+                                    )
 
     # DETECT INTERRUPTED GENERATIONS: If the last message in history is from a User without an Assistant response
     needs_answer = False
@@ -1668,26 +1639,22 @@ def chat_interface(notebook_name: str, print_debug: bool = False) -> None:
                         with tab_srag:
                             st.markdown(answer)
                             if sources and found_answer:
-                                with st.expander(_VIEW_SOURCES_LABEL, expanded=False):
-                                    for j, source in enumerate(sources):
-                                        st.markdown(
-                                            f"**{j + 1}. {source['document']} — Page {source['page']}**"
-                                        )
-                                        with st.container(border=True):
-                                            st.markdown(source["content"])
+                                if st.button(
+                                    _VIEW_SOURCES_LABEL,
+                                    key="new_srag_src",
+                                    use_container_width=False,
+                                ):
+                                    view_sources_dialog(sources)
                         with tab_corag:
                             if co_rag_content:
                                 st.markdown(co_rag_content)
                                 if co_rag_sources and co_rag_found_answer:
-                                    with st.expander(
-                                        _VIEW_SOURCES_LABEL, expanded=False
+                                    if st.button(
+                                        _VIEW_SOURCES_LABEL,
+                                        key="new_corag_src",
+                                        use_container_width=False,
                                     ):
-                                        for j, source in enumerate(co_rag_sources):
-                                            st.markdown(
-                                                f"**{j + 1}. {source['document']} — Page {source['page']}**"
-                                            )
-                                            with st.container(border=True):
-                                                st.markdown(source["content"])
+                                        view_sources_dialog(co_rag_sources)
                             else:
                                 st.markdown(
                                     "*(Co-RAG not available for this message.)*"
@@ -1846,6 +1813,55 @@ def edit_note_modal(note_id: str, current_title: str, current_content: str) -> N
             st.rerun()
         except ValueError as e:
             st.error(str(e))
+
+
+# ============================================================================
+# CITATION & TRACE DIALOGS
+# ============================================================================
+@st.dialog("✨ Citations")
+def view_sources_dialog(sources: List[Dict[str, Any]]) -> None:
+    """Show source citations in a modal dialog."""
+    for j, source in enumerate(sources):
+        st.markdown(f"**{j + 1}. {source['document']} — Page {source['page']}**")
+        with st.container(border=True):
+            st.markdown(source["content"])
+
+
+@st.dialog("💭 Self-RAG Reasoning Trace")
+def view_self_rag_trace_dialog(
+    reasoning_trace: List[Any],
+    metrics: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Show Self-RAG reasoning trace and confidence scores in a modal dialog."""
+    st.markdown("**Multi-Hop Retrieval Execution:**")
+    for i, step in enumerate(reasoning_trace, 1):
+        step_text = str(step).strip()
+        if step_text:
+            st.markdown(f"**Step {i}:** {step_text}")
+    if metrics:
+        st.markdown("---")
+        st.markdown("**Confidence Scores:**")
+        st.markdown(f"- **Total Score:** {metrics.get('total_score', 0.0):.2f}")
+        st.markdown(f"- Groundedness (ISSUP): {metrics.get('issup', 0.0):.2f}")
+        st.markdown(f"- Relevance (ISREL): {metrics.get('isrel', 0.0):.2f}")
+        st.markdown(f"- Utility (ISUSE): {metrics.get('isuse', 0.0):.2f}")
+
+
+@st.dialog("⭐ Co-RAG Review Trace")
+def view_co_rag_trace_dialog(reasoning_trace: List[Any]) -> None:
+    """Show Co-RAG Generator↔Reviewer collaboration trace in a modal dialog."""
+    st.markdown("**Generator↔Reviewer Collaboration:**")
+    for i, step in enumerate(reasoning_trace, 1):
+        if isinstance(step, dict):
+            step_typed = cast(Dict[str, str], step)
+            step_label = step_typed.get("step") or f"Step {i}"
+            step_action = (step_typed.get("action") or "").strip()
+            if step_action:
+                st.markdown(f"**{step_label}:** {step_action}")
+        else:
+            step_text = str(step).strip()
+            if step_text:
+                st.markdown(f"**Turn {i}:** {step_text}")
 
 
 def notes_panel_ui() -> None:

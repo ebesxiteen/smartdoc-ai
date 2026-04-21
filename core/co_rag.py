@@ -349,8 +349,10 @@ def _co_rag_review(
 # ============================================================================
 
 
-# Regex for parsing [FOUND: YES/NO] tag from Co-RAG generator output
-_CO_RAG_FOUND_TAG_RE = re.compile(r"\[FOUND:\s*(YES|NO)\]", re.IGNORECASE)
+# Regex for parsing [FOUND: YES/NO] tag from Co-RAG generator output.
+# Optional surrounding backticks are included — the LLM sometimes wraps the tag
+# in backtick code-spans (e.g. `[FOUND: YES]`) because the prompt shows it that way.
+_CO_RAG_FOUND_TAG_RE = re.compile(r"`*\[FOUND:\s*(YES|NO)\]`*", re.IGNORECASE)
 
 
 def co_rag_query(

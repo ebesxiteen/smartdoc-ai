@@ -754,9 +754,10 @@ APPROACH: {hint}"""
                 found_match.group(1).upper() == "YES" if found_match else False
             )
 
-            # Strip [FOUND:] tag and any legacy [STATUS:] tags from clean answer
+            # Strip [FOUND:] tag (including surrounding backticks the LLM may add)
+            # and any legacy [STATUS:] tags from clean answer
             answer = re.sub(
-                r"\[FOUND:\s*(?:YES|NO)\]", "", answer, flags=re.IGNORECASE
+                r"`*\[FOUND:\s*(?:YES|NO)\]`*", "", answer, flags=re.IGNORECASE
             ).strip()
             answer = re.sub(r"\[STATUS:[^\]]*\]", "", answer).strip()
 
