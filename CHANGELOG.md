@@ -74,6 +74,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Viewing citations and reasoning traces: Replaced the previous "Expander" UI component with a "Dialog" component for displaying source citations and reasoning traces. This change provides a more focused and immersive experience when reviewing the details of the model's reasoning and the sources it used.
 - **`LLM_AVG_TEMP` Replaces `LLM_TEMPERATURE`**: The base LLM temperature constant has been renamed to `LLM_AVG_TEMP` to clarify its role as an average from which Self-RAG derives a spread of temperatures for candidate generation, rather than a single fixed inference temperature.
 - **`retrieve_quality_chunks` Signature**: Removed the generic `settings: Dict` parameter; the function now accepts explicit `weight_semantic: float` and `weight_bm25: float` keyword arguments. All callers in `core/utils.py`, `core/self_rag.py`, and `core/co_rag.py` have been updated to pass these values explicitly.
 - **`_reformulate_query_with_history` Renamed to `reformulate_query_with_history`**: The leading underscore has been removed to reflect that this function is part of the public API consumed by `core/co_rag.py`.
