@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **User's Configurable UI Settings**: Two new boolean settings, `display_view_trace_btn` and `display_view_source_btn`, have been added to the notebook settings schema. These allow users to toggle the visibility of the "View Trace" and "View Source" buttons in the UI for each assistant message. The settings are stored as INTEGER (1/0) in the database for SQLite compatibility, and the UI components conditionally render based on these settings.
 - **Self-RAG Pipeline** (`core/self_rag.py`): New module implementing a complete 6-step Self-RAG orchestration pipeline that replaces the old linear generate-once approach:
   - **Step 0 — Intent Routing**: Two-layer greeting/factual classification. Layer 1 uses regex patterns; Layer 2 falls back to an LLM call (`LAYER2_LLM_ROUTER_PROMPT`) for ambiguous inputs, short-circuiting retrieval entirely for greetings and chitchat.
   - **Step 1 — Search Planning**: The LLM decomposes the user query into 1–3 independent sub-queries (`SEARCH_PLANNER_PROMPT`) to cover multiple aspects of complex questions. Follow-up questions are first rewritten into self-contained standalone queries (`REFORMULATE_QUERY_PROMPT`) to preserve context without polluting vector search.
