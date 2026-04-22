@@ -432,9 +432,11 @@ def upsert_notebook_settings(notebook_id: str, settings: Dict[str, Any]) -> None
                 llm_model_name, llm_num_ctx, llm_avg_temp, personal_ctx,
                 weight_semantic, weight_bm25, self_rag_max_depth, self_rag_candidates,
                 self_rag_max_retries_per_hop, self_rag_threshold_issup, self_rag_threshold_isrel,
-                self_rag_threshold_isuse, co_rag_max_retries, updated_at
+                self_rag_threshold_isuse, co_rag_max_retries,
+                display_view_trace_btn, display_view_source_btn,
+                updated_at
             ) VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP
             ) ON CONFLICT(notebook_id) DO UPDATE SET
                 rag_final_context_k=excluded.rag_final_context_k,
                 rag_rerank_top_n=excluded.rag_rerank_top_n,
@@ -457,6 +459,8 @@ def upsert_notebook_settings(notebook_id: str, settings: Dict[str, Any]) -> None
                 self_rag_threshold_isrel=excluded.self_rag_threshold_isrel,
                 self_rag_threshold_isuse=excluded.self_rag_threshold_isuse,
                 co_rag_max_retries=excluded.co_rag_max_retries,
+                display_view_trace_btn=excluded.display_view_trace_btn,
+                display_view_source_btn=excluded.display_view_source_btn,
                 updated_at=CURRENT_TIMESTAMP;
             """,
             (
@@ -485,6 +489,9 @@ def upsert_notebook_settings(notebook_id: str, settings: Dict[str, Any]) -> None
                 settings.get("self_rag_threshold_isrel"),
                 settings.get("self_rag_threshold_isuse"),
                 settings.get("co_rag_max_retries"),
+                # Store booleans as INTEGER (1/0) for SQLite compatibility
+                int(bool(settings.get("display_view_trace_btn"))),
+                int(bool(settings.get("display_view_source_btn"))),
             ),
         )
         conn.commit()

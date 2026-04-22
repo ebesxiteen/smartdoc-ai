@@ -1331,6 +1331,12 @@ def chat_interface(notebook_name: str, print_debug: bool = False) -> None:
     # Scrollable chat history container (height creates native scroll, border=False is clean)
     chat_container = st.container(height=640, border=False)
 
+    # Load per-notebook UI display settings for button visibility guards.
+    # Loaded once here so both the history loop and the new-answer block can use them.
+    _ui_settings = load_notebook_settings(st.session_state.current_notebook_id)
+    _show_trace_btn = _ui_settings["display_view_trace_btn"]
+    _show_source_btn = _ui_settings["display_view_source_btn"]
+
     # Compute source count
     num_selected = len(st.session_state.selected_sources)
     source_text = f"{num_selected} source{'s' if num_selected != 1 else ''}"
@@ -1407,27 +1413,35 @@ def chat_interface(notebook_name: str, print_debug: bool = False) -> None:
                             and message.get("self_rag_found_answer", True)
                         )
                         _srag_has_trace = bool(message.get("self_rag_reasoning_trace"))
-                        if _srag_has_src or _srag_has_trace:
+                        if (_srag_has_src and _show_source_btn) or (
+                            _srag_has_trace and _show_trace_btn
+                        ):
                             _sc1, _sc2, _ = st.columns([3, 4, 5])
                             with _sc1:
-                                if _srag_has_src:
-                                    if st.button(
+                                if (
+                                    _srag_has_src
+                                    and _show_source_btn
+                                    and st.button(
                                         _VIEW_SOURCES_LABEL,
                                         key=f"srag_src_{msg_idx}",
                                         use_container_width=False,
-                                    ):
-                                        view_sources_dialog(message["self_rag_sources"])
+                                    )
+                                ):
+                                    view_sources_dialog(message["self_rag_sources"])
                             with _sc2:
-                                if _srag_has_trace:
-                                    if st.button(
+                                if (
+                                    _srag_has_trace
+                                    and _show_trace_btn
+                                    and st.button(
                                         "Reasoning Trace",
                                         key=f"srag_trace_{msg_idx}",
                                         use_container_width=False,
-                                    ):
-                                        view_self_rag_trace_dialog(
-                                            message["self_rag_reasoning_trace"],
-                                            message.get("confidence_metrics"),
-                                        )
+                                    )
+                                ):
+                                    view_self_rag_trace_dialog(
+                                        message["self_rag_reasoning_trace"],
+                                        message.get("confidence_metrics"),
+                                    )
                     with tab_corag:
                         st.markdown(message["co_rag_content"])
                         _corag_has_src = bool(
@@ -1435,26 +1449,34 @@ def chat_interface(notebook_name: str, print_debug: bool = False) -> None:
                             and message.get("co_rag_found_answer", True)
                         )
                         _corag_has_trace = bool(message.get("co_rag_reasoning_trace"))
-                        if _corag_has_src or _corag_has_trace:
+                        if (_corag_has_src and _show_source_btn) or (
+                            _corag_has_trace and _show_trace_btn
+                        ):
                             _cc1, _cc2, _ = st.columns([3, 4, 5])
                             with _cc1:
-                                if _corag_has_src:
-                                    if st.button(
+                                if (
+                                    _corag_has_src
+                                    and _show_source_btn
+                                    and st.button(
                                         _VIEW_SOURCES_LABEL,
                                         key=f"corag_src_{msg_idx}",
                                         use_container_width=False,
-                                    ):
-                                        view_sources_dialog(message["co_rag_sources"])
+                                    )
+                                ):
+                                    view_sources_dialog(message["co_rag_sources"])
                             with _cc2:
-                                if _corag_has_trace:
-                                    if st.button(
+                                if (
+                                    _corag_has_trace
+                                    and _show_trace_btn
+                                    and st.button(
                                         "Review Trace",
                                         key=f"corag_trace_{msg_idx}",
                                         use_container_width=False,
-                                    ):
-                                        view_co_rag_trace_dialog(
-                                            message["co_rag_reasoning_trace"]
-                                        )
+                                    )
+                                ):
+                                    view_co_rag_trace_dialog(
+                                        message["co_rag_reasoning_trace"]
+                                    )
                 else:
                     st.markdown(message["content"])
 
@@ -1463,28 +1485,36 @@ def chat_interface(notebook_name: str, print_debug: bool = False) -> None:
                         and message.get("self_rag_found_answer", True)
                     )
                     _has_trace = bool(message.get("self_rag_reasoning_trace"))
-                    if _has_src or _has_trace:
+                    if (_has_src and _show_source_btn) or (
+                        _has_trace and _show_trace_btn
+                    ):
                         _bc1, _bc2, _ = st.columns([3, 4, 5])
                         with _bc1:
-                            if _has_src:
-                                if st.button(
+                            if (
+                                _has_src
+                                and _show_source_btn
+                                and st.button(
                                     _VIEW_SOURCES_LABEL,
                                     key=f"srag_src_{msg_idx}",
                                     use_container_width=False,
-                                ):
-                                    view_sources_dialog(message["self_rag_sources"])
+                                )
+                            ):
+                                view_sources_dialog(message["self_rag_sources"])
                         with _bc2:
                             # Check for historical trace
-                            if _has_trace:
-                                if st.button(
+                            if (
+                                _has_trace
+                                and _show_trace_btn
+                                and st.button(
                                     "Reasoning Trace",
                                     key=f"srag_trace_{msg_idx}",
                                     use_container_width=False,
-                                ):
-                                    view_self_rag_trace_dialog(
-                                        message["self_rag_reasoning_trace"],
-                                        message.get("confidence_metrics"),
-                                    )
+                                )
+                            ):
+                                view_self_rag_trace_dialog(
+                                    message["self_rag_reasoning_trace"],
+                                    message.get("confidence_metrics"),
+                                )
 
     # DETECT INTERRUPTED GENERATIONS: If the last message in history is from a User without an Assistant response
     needs_answer = False
@@ -1638,23 +1668,31 @@ def chat_interface(notebook_name: str, print_debug: bool = False) -> None:
                         )
                         with tab_srag:
                             st.markdown(answer)
-                            if sources and found_answer:
-                                if st.button(
+                            if (
+                                sources
+                                and found_answer
+                                and _show_source_btn
+                                and st.button(
                                     _VIEW_SOURCES_LABEL,
                                     key="new_srag_src",
                                     use_container_width=False,
-                                ):
-                                    view_sources_dialog(sources)
+                                )
+                            ):
+                                view_sources_dialog(sources)
                         with tab_corag:
                             if co_rag_content:
                                 st.markdown(co_rag_content)
-                                if co_rag_sources and co_rag_found_answer:
-                                    if st.button(
+                                if (
+                                    co_rag_sources
+                                    and co_rag_found_answer
+                                    and _show_source_btn
+                                    and st.button(
                                         _VIEW_SOURCES_LABEL,
                                         key="new_corag_src",
                                         use_container_width=False,
-                                    ):
-                                        view_sources_dialog(co_rag_sources)
+                                    )
+                                ):
+                                    view_sources_dialog(co_rag_sources)
                             else:
                                 st.markdown(
                                     "*(Co-RAG not available for this message.)*"
@@ -2582,6 +2620,20 @@ def render_notebook_settings_sidebar(notebook_id: str) -> None:
             help=cfg.CO_RAG_MAX_RETRIES_HELP_MSG,
         )
 
+        st.markdown("### UI Display")
+        new_display_view_trace_btn = st.toggle(
+            "Show Reasoning / Review Trace Buttons",
+            key=f"disp_trace{k_suf}",
+            value=bool(settings["display_view_trace_btn"]),
+            help=cfg.DISPLAY_VIEW_TRACE_BTN_HELP_MSG,
+        )
+        new_display_view_source_btn = st.toggle(
+            "Show View Sources Button",
+            key=f"disp_src{k_suf}",
+            value=bool(settings["display_view_source_btn"]),
+            help=cfg.DISPLAY_VIEW_SOURCE_BTN_HELP_MSG,
+        )
+
         # --- Settings Validation ---
         issues, is_forbidden = _compute_settings_warnings(
             snap={
@@ -2604,6 +2656,8 @@ def render_notebook_settings_sidebar(notebook_id: str) -> None:
                 "self_rag_threshold_isrel": float(new_self_rag_threshold_isrel),
                 "self_rag_threshold_isuse": float(new_self_rag_threshold_isuse),
                 "co_rag_max_retries": int(new_co_rag_max_retries),
+                "display_view_trace_btn": bool(new_display_view_trace_btn),
+                "display_view_source_btn": bool(new_display_view_source_btn),
             },
             hw_info=hw_info,
         )
@@ -2666,6 +2720,8 @@ def render_notebook_settings_sidebar(notebook_id: str) -> None:
             "self_rag_threshold_isrel": float(new_self_rag_threshold_isrel),
             "self_rag_threshold_isuse": float(new_self_rag_threshold_isuse),
             "co_rag_max_retries": int(new_co_rag_max_retries),
+            "display_view_trace_btn": bool(new_display_view_trace_btn),
+            "display_view_source_btn": bool(new_display_view_source_btn),
         }
 
         # Check if settings actually changed

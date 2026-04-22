@@ -104,6 +104,8 @@ def init_db(db_name: str = cfg.DB_ROOT_PATH, print_debug: bool = False) -> None:
             self_rag_threshold_isrel REAL DEFAULT {cfg.SELF_RAG_THRESHOLD_ISREL},
             self_rag_threshold_isuse REAL DEFAULT {cfg.SELF_RAG_THRESHOLD_ISUSE},
             co_rag_max_retries INTEGER DEFAULT {cfg.CO_RAG_MAX_RETRIES},
+            display_view_trace_btn INTEGER DEFAULT {1 if cfg.DISPLAY_VIEW_TRACE_BTN else 0},
+            display_view_source_btn INTEGER DEFAULT {1 if cfg.DISPLAY_VIEW_SOURCE_BTN else 0},
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (notebook_id) REFERENCES notebooks (id) ON DELETE CASCADE

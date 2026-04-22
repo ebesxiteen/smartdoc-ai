@@ -732,6 +732,24 @@ CO_RAG_MAX_RETRIES_HELP_MSG: str = (
 )
 
 # ============================================================================
+# UI DISPLAY SETTINGS
+# ============================================================================
+
+# Whether to show the "Reasoning Trace" (Self-RAG) and "Review Trace" (Co-RAG) buttons
+DISPLAY_VIEW_TRACE_BTN: bool = True
+DISPLAY_VIEW_TRACE_BTN_HELP_MSG: str = (
+    "Show the 💭 Reasoning Trace (Self-RAG) and ⭐ Review Trace (Co-RAG) buttons "
+    "below each response. Disable to hide trace details and keep the chat cleaner."
+)
+
+# Whether to show the "View Sources" button for both pipelines
+DISPLAY_VIEW_SOURCE_BTN: bool = True
+DISPLAY_VIEW_SOURCE_BTN_HELP_MSG: str = (
+    "Show the ✨ View Sources button below each response for both Self-RAG and Co-RAG. "
+    "Disable to hide source citations and keep the chat cleaner."
+)
+
+# ============================================================================
 # CO-RAG PROMPTS
 # ============================================================================
 

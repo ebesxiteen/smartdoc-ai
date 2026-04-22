@@ -116,6 +116,9 @@ def get_default_notebook_settings() -> Dict[str, Any]:
             - self_rag_threshold_issup (float): Threshold for "Is Supportive" in Self-RAG
             - self_rag_threshold_isrel (float): Threshold for "Is Relevant" in Self-RAG
             - self_rag_threshold_isuse (float): Threshold for "Is Useful" in Self-RAG
+            - co_rag_max_retries (int): Maximum Generator↔Reviewer collaboration turns
+            - display_view_trace_btn (bool): Show Reasoning Trace and Review Trace buttons
+            - display_view_source_btn (bool): Show View Sources button
 
     Note:
         All values are loaded from core/configs.py. Modify settings there to change defaults.
@@ -142,6 +145,8 @@ def get_default_notebook_settings() -> Dict[str, Any]:
         "self_rag_threshold_isrel": cfg.SELF_RAG_THRESHOLD_ISREL,
         "self_rag_threshold_isuse": cfg.SELF_RAG_THRESHOLD_ISUSE,
         "co_rag_max_retries": cfg.CO_RAG_MAX_RETRIES,
+        "display_view_trace_btn": cfg.DISPLAY_VIEW_TRACE_BTN,
+        "display_view_source_btn": cfg.DISPLAY_VIEW_SOURCE_BTN,
     }
 
 
@@ -230,6 +235,14 @@ def load_notebook_settings(
         "co_rag_max_retries": settings.get("co_rag_max_retries")
         if settings.get("co_rag_max_retries") is not None
         else defaults["co_rag_max_retries"],
+        # Boolean settings stored as INTEGER (1/0) in SQLite; convert back to bool.
+        # Fall back to config default if the column is NULL (e.g. old rows before migration).
+        "display_view_trace_btn": bool(settings["display_view_trace_btn"])
+        if settings.get("display_view_trace_btn") is not None
+        else defaults["display_view_trace_btn"],
+        "display_view_source_btn": bool(settings["display_view_source_btn"])
+        if settings.get("display_view_source_btn") is not None
+        else defaults["display_view_source_btn"],
     }
 
 
