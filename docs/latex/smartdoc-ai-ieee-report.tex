@@ -563,7 +563,8 @@ retrieval strategies based on their architectural design properties.
 \label{tab:comparison}
 \centering
 \footnotesize
-\begin{tabular}{|p{0.26\columnwidth}|c|c|c|}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{|p{0.28\columnwidth}|p{0.24\columnwidth}|p{0.24\columnwidth}|p{0.24\columnwidth}|}
 \hline
 \textbf{Criterion} & \textbf{Single-Pass} & \textbf{Self-RAG} & \textbf{Co-RAG} \\
 \hline
@@ -577,7 +578,8 @@ Latency & Low & High & Medium \\
 \hline
 Failure visibility & None & Confidence score & Critique trace \\
 \hline
-\end{tabular}
+\end{tabular}%
+}% end \resizebox
 \end{table}
 
 The table reflects architectural design rationale rather than empirical
