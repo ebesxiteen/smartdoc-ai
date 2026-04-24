@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Latex Document Report**: Added a comprehensive LaTeX report (`docs/smartdoc-ai-ieee-report.tex`) covering the full architecture, design decisions, and implementation details of the project, formatted for academic presentation.
 - **User's Configurable UI Settings**: Two new boolean settings, `display_view_trace_btn` and `display_view_source_btn`, have been added to the notebook settings schema. These allow users to toggle the visibility of the "View Trace" and "View Source" buttons in the UI for each assistant message. The settings are stored as INTEGER (1/0) in the database for SQLite compatibility, and the UI components conditionally render based on these settings.
 - **Self-RAG Pipeline** (`core/self_rag.py`): New module implementing a complete 6-step Self-RAG orchestration pipeline that replaces the old linear generate-once approach:
   - **Step 0 — Intent Routing**: Two-layer greeting/factual classification. Layer 1 uses regex patterns; Layer 2 falls back to an LLM call (`LAYER2_LLM_ROUTER_PROMPT`) for ambiguous inputs, short-circuiting retrieval entirely for greetings and chitchat.
@@ -75,6 +76,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Moved the `diagrams` folder into `docs` for better organization and renamed `rag(system).md` to `rag-system.md` for improved readability and consistency.
 - Viewing citations and reasoning traces: Replaced the previous "Expander" UI component with a "Dialog" component for displaying source citations and reasoning traces. This change provides a more focused and immersive experience when reviewing the details of the model's reasoning and the sources it used.
 - **`LLM_AVG_TEMP` Replaces `LLM_TEMPERATURE`**: The base LLM temperature constant has been renamed to `LLM_AVG_TEMP` to clarify its role as an average from which Self-RAG derives a spread of temperatures for candidate generation, rather than a single fixed inference temperature.
 - **`retrieve_quality_chunks` Signature**: Removed the generic `settings: Dict` parameter; the function now accepts explicit `weight_semantic: float` and `weight_bm25: float` keyword arguments. All callers in `core/utils.py`, `core/self_rag.py`, and `core/co_rag.py` have been updated to pass these values explicitly.
