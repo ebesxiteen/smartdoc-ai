@@ -154,6 +154,7 @@ CO_RAG_MAX_RETRIES: int = 3          # Max Generator↔Reviewer turns (0 = no re
 ```txt
 smartdoc-ai/
 ├── app.py                    # Main Streamlit entry point
+├── docs/                     # Documentation and diagrams
 ├── core/
 │   ├── configs.py           # Centralized configuration parameters
 │   ├── rag.py               # Dual-pipeline orchestrator (run_dual_rag)
