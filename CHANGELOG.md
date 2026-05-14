@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Changed
+
+- **Latex Document Report**: Changed to English as a default language instead of Vietnamese in report title, author information, language packages.
+
+### Fixed
+
+- **Latex Document Report**: Fixed overflow table issue.
+
 ## [2.0.0] - 2026-04-24
 
 ### Breaking Changes
@@ -320,6 +330,7 @@ None
 
 ---
 
+[Unreleased]: https://github.com/dungtq2k5/smartdoc-ai/compare/2.0.0...HEAD
 [2.0.0]: https://github.com/dungtq2k5/smartdoc-ai/compare/1.1.0...2.0.0
 [1.1.0]: https://github.com/dungtq2k5/smartdoc-ai/compare/1.0.0...1.1.0
 [1.0.0]: https://github.com/dungtq2k5/smartdoc-ai/releases/tag/1.0.0
